@@ -13,6 +13,7 @@
     "core:webview:default",
     "core:window:allow-set-fullscreen",
     "core:window:allow-set-decorations",
+    "core:webview:allow-print",
     "updater:default",
     "dialog:default",
     "fs:allow-write-text-file",
@@ -29,7 +30,9 @@
         "close_presentation_window",
         "list_monitors",
         "fetch_youversion",
-        "fetch_url"
+        "fetch_url",
+        "take_pending_open_files",
+        "read_glide_file"
       ]
     }
   ]

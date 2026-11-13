@@ -38,7 +38,9 @@ import {
   ChevronRight,
   Plus,
   Library,
-  GripVertical
+  GripVertical,
+  FileDown,
+  Printer
 } from 'lucide-react';
 import { motion, AnimatePresence, Reorder } from 'motion/react';
 import { invoke } from '@tauri-apps/api/core';
@@ -394,9 +396,39 @@ export default function App() {
 
   const [showLibrarySetMenu, setShowLibrarySetMenu] = useState(false);
   const [showUnsavedSetModal, setShowUnsavedSetModal] = useState(false);
+  const [isDraggingGlideFile, setIsDraggingGlideFile] = useState(false);
+  const [pendingExternalGlideFile, setPendingExternalGlideFile] = useState<{ filePath: string | null; filename: string; data: any } | null>(null);
+  const [showExportModal, setShowExportModal] = useState(false);
+  const [exportScope, setExportScope] = useState<'current' | 'all'>('current');
+  const [exportPaperStyle, setExportPaperStyle] = useState<'white' | 'screen'>('white');
+  const [exportShowVerseNumbers, setExportShowVerseNumbers] = useState(true);
+  const [exportOneVersePerLine, setExportOneVersePerLine] = useState(false);
+  const [exportPrintSnapshot, setExportPrintSnapshot] = useState<{
+    sessions: ScriptureSession[];
+    title: string;
+    subtitle: string;
+    paperStyle: 'white' | 'screen';
+    showVerseNumbers: boolean;
+    oneVersePerLine: boolean;
+  } | null>(null);
   const librarySetMenuRef = useRef<HTMLDivElement>(null);
   const browserSetInputRef = useRef<HTMLInputElement>(null);
   const pendingBrowserLoadModeRef = useRef<'replace' | 'append'>('replace');
+  const appModeRef = useRef(appMode);
+  const hasUnsavedSetChangesRef = useRef(hasUnsavedSetChanges);
+  const currentSetFilePathRef = useRef(currentSetFilePath);
+
+  useEffect(() => {
+    appModeRef.current = appMode;
+  }, [appMode]);
+
+  useEffect(() => {
+    hasUnsavedSetChangesRef.current = hasUnsavedSetChanges;
+  }, [hasUnsavedSetChanges]);
+
+  useEffect(() => {
+    currentSetFilePathRef.current = currentSetFilePath;
+  }, [currentSetFilePath]);
 
   useEffect(() => {
     try {
@@ -795,7 +827,7 @@ export default function App() {
   }, [appMode, activeVerseIndex, settings, verses, verses.length]);
 
   useEffect(() => {
-    if (appMode !== 'select') {
+    if (appMode === 'present') {
       try {
         const savedState = localStorage.getItem('osb_state');
         if (savedState) {
@@ -904,35 +936,7 @@ export default function App() {
         const content = await readTextFile(selected);
         const data = JSON.parse(content);
         const filename = selected.split(/[/\\]/).pop() || 'Loaded Study';
-
-        if (Array.isArray(data.sessions)) {
-          applyLoadedSetData(data, selected, filename, 'append');
-          return;
-        }
-        
-        if (data.verses) {
-          const newSessionId = `session-${Date.now()}`;
-          const newSession: ScriptureSession = {
-            id: newSessionId,
-            name: filename,
-            verses: data.verses,
-            translation: data.translation || 'esv',
-            activeVerseIndex: 0,
-            referenceInput: data.verses[0]?.reference.split(':')[0] || 'Genesis 1',
-            filePath: selected
-          };
-
-          setSessions(prev => [...prev, newSession]);
-          setActiveSessionId(newSessionId);
-          setResetKey(prev => prev + 1);
-          setHasUnsavedSetChanges(true);
-          
-          // Force a sync to storage/presentation
-          setTimeout(() => syncStateToStorage({ 
-            verses: data.verses, 
-            forceDomRead: false 
-          }), 100);
-        }
+        applyLoadedSetData(data, selected, filename, 'append');
       }
     } catch (err: any) {
       console.error('Failed to load markup:', err);
@@ -1150,6 +1154,390 @@ export default function App() {
       return;
     }
     performLoadSet(mode);
+  };
+
+  const isSupportedGlideFilename = (name: string) => /\.(glide|json)$/i.test(name.trim());
+
+  const showLoadErrorMessage = useCallback(async (title: string, detail: string) => {
+    if (isTauriApp) {
+      const { message } = await import('@tauri-apps/plugin-dialog');
+      await message(detail, { title, kind: 'error' });
+    } else {
+      alert(detail);
+    }
+  }, [isTauriApp]);
+
+  const openExternalGlidePayload = useCallback((data: any, filePath: string | null, filename: string) => {
+    const isSetPayload = Array.isArray(data?.sessions);
+    const isSinglePayload = Array.isArray(data?.verses);
+    if (!isSetPayload && !isSinglePayload) {
+      throw new Error('Unrecognized ScriptureGlide file format.');
+    }
+
+    const curSessions = sessionsRef.current;
+    const isFreshDefaultWorkspace =
+      curSessions.length === 1 &&
+      curSessions[0].id === 'default' &&
+      !currentSetFilePathRef.current;
+
+    if (hasUnsavedSetChangesRef.current && !isFreshDefaultWorkspace) {
+      if (appModeRef.current === 'select') {
+        setAppMode('control');
+      }
+      setPendingExternalGlideFile({ filePath, filename, data });
+      return;
+    }
+
+    const mode: 'replace' | 'append' = (isSetPayload || isFreshDefaultWorkspace) ? 'replace' : 'append';
+    applyLoadedSetData(data, filePath, filename, mode);
+    if (appModeRef.current === 'select') {
+      setAppMode('control');
+    }
+  }, []);
+
+  const openGlideFileFromPath = useCallback(async (filePath: string) => {
+    if (!isSupportedGlideFilename(filePath)) return;
+    try {
+      const content = await invoke<string>('read_glide_file', { path: filePath });
+      const data = JSON.parse(content);
+      const filename = filePath.split(/[/\\]/).pop() || 'Loaded Study.glide';
+      openExternalGlidePayload(data, filePath, filename);
+    } catch (err: any) {
+      console.error('Failed to open .glide file from path:', err);
+      await showLoadErrorMessage('Open Error', `Failed to open "${filePath.split(/[/\\]/).pop() || filePath}": ${err?.message || err}`);
+    }
+  }, [openExternalGlidePayload, showLoadErrorMessage]);
+
+  const openGlideFileFromFile = useCallback(async (file: File) => {
+    if (!isSupportedGlideFilename(file.name)) return;
+    try {
+      const content = await file.text();
+      const data = JSON.parse(content);
+      openExternalGlidePayload(data, null, file.name);
+    } catch (err: any) {
+      console.error('Failed to open dropped .glide file:', err);
+      await showLoadErrorMessage('Open Error', `Failed to open "${file.name}": ${err?.message || err}`);
+    }
+  }, [openExternalGlidePayload, showLoadErrorMessage]);
+
+  useEffect(() => {
+    if (!isTauriApp || appMode === 'present') return;
+
+    let cancelled = false;
+    let unlistenOpenFile: UnlistenFn | undefined;
+    let unlistenDragDrop: UnlistenFn | undefined;
+
+    invoke<string[]>('take_pending_open_files')
+      .then((paths) => {
+        if (cancelled || !Array.isArray(paths) || paths.length === 0) return;
+        for (const p of paths) {
+          void openGlideFileFromPath(p);
+        }
+      })
+      .catch(() => {});
+
+    listen<string>('open-glide-file', (event) => {
+      if (cancelled || !event.payload) return;
+      void openGlideFileFromPath(event.payload);
+    }).then((fn) => {
+      if (cancelled) fn();
+      else unlistenOpenFile = fn;
+    });
+
+    getCurrentWindow().onDragDropEvent((event) => {
+      if (cancelled) return;
+      const payload = event.payload;
+      if (payload.type === 'enter') {
+        const hasSupported = Array.isArray(payload.paths) && payload.paths.some(isSupportedGlideFilename);
+        setIsDraggingGlideFile(hasSupported);
+      } else if (payload.type === 'leave') {
+        setIsDraggingGlideFile(false);
+      } else if (payload.type === 'drop') {
+        setIsDraggingGlideFile(false);
+        const supportedPaths = (payload.paths || []).filter(isSupportedGlideFilename);
+        if (supportedPaths.length === 0) {
+          void showLoadErrorMessage('Unsupported File', 'Drop a .glide passage or ScriptureGlide set file to open it.');
+          return;
+        }
+        for (const p of supportedPaths) {
+          void openGlideFileFromPath(p);
+        }
+      }
+    }).then((fn) => {
+      if (cancelled) fn();
+      else unlistenDragDrop = fn;
+    }).catch(() => {});
+
+    return () => {
+      cancelled = true;
+      if (unlistenOpenFile) unlistenOpenFile();
+      if (unlistenDragDrop) unlistenDragDrop();
+    };
+  }, [isTauriApp, appMode, openGlideFileFromPath, showLoadErrorMessage]);
+
+  const handleBrowserDragOver = (e: React.DragEvent<HTMLDivElement>) => {
+    if (isTauriApp || appMode === 'present') return;
+    if (e.dataTransfer?.types && Array.from(e.dataTransfer.types).includes('Files')) {
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'copy';
+      if (!isDraggingGlideFile) setIsDraggingGlideFile(true);
+    }
+  };
+
+  const handleBrowserDragLeave = (e: React.DragEvent<HTMLDivElement>) => {
+    if (isTauriApp || appMode === 'present') return;
+    if (e.currentTarget === e.target || !e.currentTarget.contains(e.relatedTarget as Node)) {
+      setIsDraggingGlideFile(false);
+    }
+  };
+
+  const handleBrowserDrop = async (e: React.DragEvent<HTMLDivElement>) => {
+    if (isTauriApp || appMode === 'present') return;
+    const files: File[] = e.dataTransfer?.files ? Array.from(e.dataTransfer.files) : [];
+    if (files.length === 0) return;
+    e.preventDefault();
+    setIsDraggingGlideFile(false);
+    const supported = files.filter(f => isSupportedGlideFilename(f.name));
+    if (supported.length === 0) {
+      await showLoadErrorMessage('Unsupported File', 'Drop a .glide passage or ScriptureGlide set file to open it.');
+      return;
+    }
+    for (const file of supported) {
+      await openGlideFileFromFile(file);
+    }
+  };
+
+  const buildExportSnapshot = (scope: 'current' | 'all', paperStyle: 'white' | 'screen', showVerseNums: boolean, onePerLine: boolean) => {
+    const latestSessions = getLatestSessionsSnapshot();
+    const targetSessions = scope === 'all'
+      ? latestSessions
+      : latestSessions.filter(s => s.id === activeSessionIdRef.current);
+    const resolvedSessions = targetSessions.length > 0 ? targetSessions : [latestSessions[0]].filter(Boolean);
+    const title = scope === 'all'
+      ? (currentSetName || 'ScriptureGlide Study Set')
+      : (resolvedSessions[0]?.name || currentSetName || 'ScriptureGlide Passage');
+    const subtitle = scope === 'all'
+      ? `${resolvedSessions.length} passages • ScriptureGlide Export`
+      : `${(resolvedSessions[0]?.translation || translation).toUpperCase()} • ScriptureGlide Export`;
+    return {
+      sessions: resolvedSessions,
+      title,
+      subtitle,
+      paperStyle,
+      showVerseNumbers: showVerseNums,
+      oneVersePerLine: onePerLine
+    };
+  };
+
+  const openExportModal = (defaultScope: 'current' | 'all' = 'current') => {
+    setShowLibrarySetMenu(false);
+    setExportScope(defaultScope);
+    setExportShowVerseNumbers(settings.showVerseNumbers);
+    setExportOneVersePerLine(settings.oneVersePerLine);
+    setShowExportModal(true);
+  };
+
+  const escapeHtmlAttr = (str: string) =>
+    str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+
+  const getExportPassageNumber = (verse: Verse, index: number) => {
+    const fullRef = verse.reference.split(' ').pop() || '';
+    return (index === 0 || verse.isNewChapter || verse.isNewPassage) ? fullRef : (fullRef.split(':')[1] || fullRef);
+  };
+
+  const buildExportHtmlDocument = (snapshot: NonNullable<typeof exportPrintSnapshot>) => {
+    const isWhite = snapshot.paperStyle === 'white';
+    const bgColor = isWhite ? '#ffffff' : settings.pageColor;
+    const textColor = isWhite ? '#0f172a' : (settings.theme === 'dark' ? '#f8fafc' : '#0f172a');
+    const mutedColor = isWhite ? '#475569' : (settings.theme === 'dark' ? '#94a3b8' : '#475569');
+    const borderColor = isWhite ? '#e2e8f0' : (settings.theme === 'dark' ? '#334155' : '#cbd5e1');
+    const fontMeta = FONT_OPTIONS.find(f => f.id === settings.fontFamily) || FONT_OPTIONS[0];
+    const baseFontSize = Math.min(Math.max(Math.round(settings.textSize * 0.5), 14), 22);
+
+    const sectionsHtml = snapshot.sessions.map((session, sIdx) => {
+      const isRtl = session.translation === 'wlc';
+      const versesHtml = session.verses.map((v, vIdx) => {
+        const vNum = getExportPassageNumber(v, vIdx);
+        const bookHeaderHtml = (v.bookHeader && settings.showBookHeader !== false)
+          ? `<div class="book-header">${escapeHtmlAttr(v.bookHeader)}</div>`
+          : '';
+        const dividerHtml = (v.isNewPassage || v.isNewChapter) ? `<div class="chapter-break"></div>` : '';
+        const acrosticHtml = v.acrostic ? `<div class="acrostic">${escapeHtmlAttr(v.acrostic)}</div>` : '';
+        const numSpan = snapshot.showVerseNumbers
+          ? `<span class="verse-num" style="color: ${escapeHtmlAttr(settings.verseNumberColor || '#d97706')};">${escapeHtmlAttr(vNum)}</span>`
+          : '';
+        const contentHtml = (v.html || escapeHtmlAttr(v.text)).replace(/\u200E/g, '');
+        if (snapshot.oneVersePerLine || v.isNewChapter || v.acrostic) {
+          return `${bookHeaderHtml}${dividerHtml}<div class="verse-block">${acrosticHtml}<div class="verse-row">${numSpan}<span class="verse-body" dir="auto">${contentHtml}</span></div></div>`;
+        }
+        return `${bookHeaderHtml}${dividerHtml}<span class="verse-inline">${numSpan}<span class="verse-body" dir="auto">${contentHtml}</span> </span>`;
+      }).join('');
+
+      return `
+        <section class="passage-section${sIdx > 0 ? ' page-break' : ''}" dir="${isRtl ? 'rtl' : 'ltr'}">
+          <header class="passage-header">
+            <div class="passage-title">${escapeHtmlAttr(session.name)}</div>
+            <div class="passage-meta">${escapeHtmlAttr(session.translation.toUpperCase())} • ${session.verses.length} verse${session.verses.length === 1 ? '' : 's'}</div>
+          </header>
+          <div class="passage-content">${versesHtml}</div>
+        </section>`;
+    }).join('\n');
+
+    return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>${escapeHtmlAttr(snapshot.title)}</title>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Crimson+Pro:ital,wght@0,400;0,600;1,400&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&family=Outfit:wght@400;600;700&family=Playfair+Display:ital,wght@0,400;0,700;1,400&family=Cinzel:wght@400;700&family=Merriweather:ital,wght@0,400;0,700;1,400&family=Lora:ital,wght@0,400;0,700;1,400&family=Caveat:wght@400;700&family=Montserrat:wght@400;600;700&family=Fira+Sans:ital,wght@0,400;0,600;1,400&family=EB+Garamond:ital,wght@0,400;0,600;1,400&family=Courier+Prime:ital,wght@0,400;0,700;1,400&family=Bebas+Neue&family=Pacifico&display=swap" />
+  <style>
+    :root {
+      --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+      --font-display: "Outfit", sans-serif;
+      --font-serif: "Crimson Pro", "Georgia", serif;
+      --font-mono: "JetBrains Mono", ui-monospace, monospace;
+      --font-playfair: "Playfair Display", serif;
+      --font-cinzel: "Cinzel", serif;
+      --font-merriweather: "Merriweather", serif;
+      --font-lora: "Lora", serif;
+      --font-caveat: "Caveat", cursive;
+      --font-montserrat: "Montserrat", sans-serif;
+      --font-fira: "Fira Sans", sans-serif;
+      --font-garamond: "EB Garamond", serif;
+      --font-courier: "Courier Prime", monospace;
+      --font-bebas: "Bebas Neue", sans-serif;
+      --font-pacifico: "Pacifico", cursive;
+    }
+    * { box-sizing: border-box; -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; }
+    body {
+      margin: 0;
+      padding: 36px 28px 60px;
+      background: ${bgColor};
+      color: ${textColor};
+      font-family: ${fontMeta.css};
+    }
+    .toolbar {
+      max-width: 780px;
+      margin: 0 auto 24px;
+      padding: 12px 16px;
+      border-radius: 12px;
+      border: 1px solid ${borderColor};
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      font-family: var(--font-sans);
+      font-size: 13px;
+    }
+    .print-btn {
+      background: #d97706;
+      color: #ffffff;
+      border: none;
+      border-radius: 8px;
+      padding: 8px 14px;
+      font-weight: 700;
+      cursor: pointer;
+    }
+    .page-wrap { max-width: 780px; margin: 0 auto; }
+    .passage-section { margin-bottom: 36px; }
+    .passage-header {
+      border-bottom: 2px solid ${borderColor};
+      padding-bottom: 10px;
+      margin-bottom: 20px;
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      gap: 12px;
+      font-family: var(--font-sans);
+    }
+    .passage-title { font-size: 20px; font-weight: 800; }
+    .passage-meta { font-size: 11px; text-transform: uppercase; letter-spacing: 0.12em; color: ${mutedColor}; font-weight: 700; }
+    .passage-content { font-size: ${baseFontSize}px; line-height: ${Math.max(settings.textSpacing, 1.65)}; }
+    .book-header { font-size: 24px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.18em; opacity: 0.45; margin: 18px 0 10px; text-align: center; }
+    .chapter-break { height: 14px; }
+    .acrostic { font-size: 0.7em; text-transform: uppercase; letter-spacing: 0.25em; opacity: 0.55; margin-bottom: 4px; font-style: italic; }
+    .verse-block { margin-bottom: 12px; }
+    .verse-row { display: flex; gap: 10px; align-items: baseline; }
+    .verse-inline { display: inline; }
+    .verse-num { font-size: 0.72em; font-weight: 700; margin-inline-end: 5px; vertical-align: super; opacity: 0.85; }
+    .verse-markup { box-decoration-break: clone; -webkit-box-decoration-break: clone; }
+    @media print {
+      @page { margin: 0.6in; }
+      body { padding: 0; }
+      .no-print { display: none !important; }
+      .page-break { break-before: page; page-break-before: always; }
+    }
+  </style>
+</head>
+<body>
+  <div class="toolbar no-print">
+    <span><strong>${escapeHtmlAttr(snapshot.title)}</strong> &mdash; ${escapeHtmlAttr(snapshot.subtitle)}</span>
+    <button class="print-btn" onclick="window.print()">Print / Save as PDF</button>
+  </div>
+  <main class="page-wrap">
+    ${sectionsHtml}
+  </main>
+</body>
+</html>`;
+  };
+
+  const handlePrintPdfExport = () => {
+    const snapshot = buildExportSnapshot(exportScope, exportPaperStyle, exportShowVerseNumbers, exportOneVersePerLine);
+    setExportPrintSnapshot(snapshot);
+    setShowExportModal(false);
+
+    const prevTitle = document.title;
+    document.title = snapshot.title.replace(/[<>:"/\\|?*]+/g, '').trim() || 'ScriptureGlide-Export';
+
+    const restoreTitle = () => {
+      document.title = prevTitle;
+      window.removeEventListener('afterprint', restoreTitle);
+    };
+    window.addEventListener('afterprint', restoreTitle);
+
+    requestAnimationFrame(() => {
+      setTimeout(() => {
+        window.print();
+        setTimeout(() => {
+          document.title = prevTitle;
+          window.removeEventListener('afterprint', restoreTitle);
+        }, 1500);
+      }, 80);
+    });
+  };
+
+  const handleSaveHtmlExport = async () => {
+    const snapshot = buildExportSnapshot(exportScope, exportPaperStyle, exportShowVerseNumbers, exportOneVersePerLine);
+    const htmlDoc = buildExportHtmlDocument(snapshot);
+    const safeName = (snapshot.title.replace(/[<>:"/\\|?*]+/g, '').trim() || 'ScriptureGlide-Export') + '.html';
+
+    try {
+      if (!isTauriApp) {
+        const blob = new Blob([htmlDoc], { type: 'text/html;charset=utf-8' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = safeName;
+        a.click();
+        URL.revokeObjectURL(url);
+        setShowExportModal(false);
+        return;
+      }
+
+      const { save, message } = await import('@tauri-apps/plugin-dialog');
+      const { writeTextFile } = await import('@tauri-apps/plugin-fs');
+      const filePath = await save({
+        defaultPath: safeName,
+        filters: [{ name: 'HTML Handout', extensions: ['html'] }]
+      });
+      if (filePath) {
+        await writeTextFile(filePath, htmlDoc);
+        setShowExportModal(false);
+        await message(`Exported HTML handout to "${filePath.split(/[/\\]/).pop()}". You can open it in any browser or print to PDF.`, { title: 'Export Complete', kind: 'info' });
+      }
+    } catch (err: any) {
+      console.error('Failed to export HTML:', err);
+      await showLoadErrorMessage('Export Error', `Failed to export HTML: ${err?.message || err}`);
+    }
   };
   const stateRef = useRef({ activeVerseIndex, verses, settings, translation });
 
@@ -2149,7 +2537,19 @@ export default function App() {
 
   if (appMode === 'select') {
     return (
-      <div className="min-h-screen bg-slate-950 text-white flex items-center justify-center p-6 font-sans">
+      <div
+        className="min-h-screen bg-slate-950 text-white flex items-center justify-center p-6 font-sans relative"
+        onDragOver={handleBrowserDragOver}
+        onDragLeave={handleBrowserDragLeave}
+        onDrop={handleBrowserDrop}
+      >
+        {isDraggingGlideFile && (
+          <div className="fixed inset-0 z-[400] bg-slate-950/80 backdrop-blur-sm border-4 border-dashed border-amber-500 flex flex-col items-center justify-center gap-3 pointer-events-none">
+            <FolderOpen size={44} className="text-amber-500" />
+            <p className="text-lg font-display font-bold uppercase tracking-wider text-white">Drop .glide File to Open</p>
+            <p className="text-xs text-slate-300">Opens a passage file or full ScriptureGlide set</p>
+          </div>
+        )}
         <motion.div 
           initial={{ opacity: 0, scale: 0.9 }} 
           animate={{ opacity: 1, scale: 1 }}
@@ -2350,13 +2750,24 @@ export default function App() {
   }
 
   return (
+    <>
     <div 
-      className={`h-screen flex flex-col transition-colors duration-500 overflow-hidden relative selection:bg-blue-300/40 dark:selection:bg-blue-900/50`}
+      className={`h-screen flex flex-col transition-colors duration-500 overflow-hidden relative selection:bg-blue-300/40 dark:selection:bg-blue-900/50 print:hidden`}
       style={{ 
         backgroundColor: settings.pageColor,
         fontFamily: activeFont.css
       }}
+      onDragOver={handleBrowserDragOver}
+      onDragLeave={handleBrowserDragLeave}
+      onDrop={handleBrowserDrop}
     >
+      {isDraggingGlideFile && (
+        <div className="fixed inset-0 z-[400] bg-slate-950/80 backdrop-blur-sm border-4 border-dashed border-amber-500 flex flex-col items-center justify-center gap-3 pointer-events-none">
+          <FolderOpen size={44} className="text-amber-500" />
+          <p className="text-lg font-display font-bold uppercase tracking-wider text-white">Drop .glide File to Open</p>
+          <p className="text-xs text-slate-300">Loads your ScriptureGlide bundle or marked-up passage</p>
+        </div>
+      )}
       <AnimatePresence>
       </AnimatePresence>
 
@@ -2493,6 +2904,218 @@ export default function App() {
       </AnimatePresence>
 
       <AnimatePresence>
+        {pendingExternalGlideFile && (
+          <div className="fixed inset-0 z-[315] flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-md">
+            <motion.div
+              initial={{ opacity: 0, scale: 0.94, y: 12 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.94, y: 12 }}
+              className={`w-full max-w-md ${uiBg} border ${uiBorder} rounded-3xl shadow-2xl p-6 overflow-hidden font-sans`}
+            >
+              <div className="flex items-start justify-between gap-4 mb-4">
+                <div>
+                  <span className="text-[10px] font-bold uppercase tracking-[0.25em] text-amber-500 block mb-1">
+                    Open .glide File
+                  </span>
+                  <h3 className={`text-xl ${uiText} font-display font-black uppercase tracking-tight break-words`}>
+                    {pendingExternalGlideFile.filename.replace(/\.glide$/i, '')}
+                  </h3>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setPendingExternalGlideFile(null)}
+                  className={`w-8 h-8 flex items-center justify-center rounded-full ${uiBtnBg} ${uiTextMuted} hover:text-amber-500 transition-colors shrink-0`}
+                >
+                  <X size={16} />
+                </button>
+              </div>
+              <p className={`text-xs ${uiTextMuted} leading-relaxed mb-6`}>
+                Your current Library has unsaved changes{currentSetName ? ` (${currentSetName})` : ''}. How would you like to open this file?
+              </p>
+              <div className="flex flex-col gap-2">
+                <button
+                  type="button"
+                  onClick={async () => {
+                    const target = pendingExternalGlideFile;
+                    const saved = await saveSet(false);
+                    if (saved && target) {
+                      setPendingExternalGlideFile(null);
+                      applyLoadedSetData(target.data, target.filePath, target.filename, 'replace');
+                    }
+                  }}
+                  className="w-full bg-amber-600 hover:bg-amber-500 text-white font-bold py-3 rounded-xl text-xs uppercase tracking-widest transition-all active:scale-95 flex items-center justify-center gap-2"
+                >
+                  <Save size={14} /> Save Current &amp; Open
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    const target = pendingExternalGlideFile;
+                    setPendingExternalGlideFile(null);
+                    if (target) applyLoadedSetData(target.data, target.filePath, target.filename, 'replace');
+                  }}
+                  className={`w-full ${uiBtnBg} ${uiBtnHover} ${uiText} border ${uiBorder} font-bold py-3 rounded-xl text-xs uppercase tracking-widest transition-all active:scale-95`}
+                >
+                  Replace Without Saving
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    const target = pendingExternalGlideFile;
+                    setPendingExternalGlideFile(null);
+                    if (target) applyLoadedSetData(target.data, target.filePath, target.filename, 'append');
+                  }}
+                  className={`w-full ${uiBtnBg} ${uiBtnHover} ${uiText} border ${uiBorder} font-bold py-3 rounded-xl text-xs uppercase tracking-widest transition-all active:scale-95`}
+                >
+                  Append to Current Library
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setPendingExternalGlideFile(null)}
+                  className={`w-full py-2.5 rounded-xl text-xs font-semibold ${uiTextMuted} hover:text-amber-500 transition-colors`}
+                >
+                  Cancel
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      <AnimatePresence>
+        {showExportModal && (
+          <div className="fixed inset-0 z-[315] flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-md">
+            <motion.div
+              initial={{ opacity: 0, scale: 0.94, y: 12 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.94, y: 12 }}
+              className={`w-full max-w-md ${uiBg} border ${uiBorder} rounded-3xl shadow-2xl p-6 overflow-hidden font-sans`}
+            >
+              <div className="flex items-start justify-between gap-4 mb-4">
+                <div>
+                  <span className="text-[10px] font-bold uppercase tracking-[0.25em] text-amber-500 block mb-1">
+                    Print &amp; Handout
+                  </span>
+                  <h3 className={`text-xl ${uiText} font-display font-black uppercase tracking-tight`}>
+                    Export Marked-Up Scripture
+                  </h3>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setShowExportModal(false)}
+                  className={`w-8 h-8 flex items-center justify-center rounded-full ${uiBtnBg} ${uiTextMuted} hover:text-amber-500 transition-colors`}
+                >
+                  <X size={16} />
+                </button>
+              </div>
+
+              <div className="space-y-4 mb-6">
+                <div>
+                  <label className={`text-[10px] font-bold uppercase tracking-widest ${uiTextMuted} block mb-1.5`}>
+                    What to Export
+                  </label>
+                  <div className="grid grid-cols-2 gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setExportScope('current')}
+                      className={`px-3 py-2.5 rounded-xl border text-xs font-bold transition-all text-left ${
+                        exportScope === 'current'
+                          ? 'bg-amber-500/15 border-amber-500 text-amber-500'
+                          : `${uiBtnBg} ${uiBorder} ${uiTextMuted}`
+                      }`}
+                    >
+                      <div className="truncate">Current Passage</div>
+                      <div className="text-[10px] font-normal opacity-75 truncate">{activeSession.name}</div>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setExportScope('all')}
+                      className={`px-3 py-2.5 rounded-xl border text-xs font-bold transition-all text-left ${
+                        exportScope === 'all'
+                          ? 'bg-amber-500/15 border-amber-500 text-amber-500'
+                          : `${uiBtnBg} ${uiBorder} ${uiTextMuted}`
+                      }`}
+                    >
+                      <div>Entire Library Set</div>
+                      <div className="text-[10px] font-normal opacity-75">{sessions.length} passage{sessions.length === 1 ? '' : 's'}</div>
+                    </button>
+                  </div>
+                </div>
+
+                <div>
+                  <label className={`text-[10px] font-bold uppercase tracking-widest ${uiTextMuted} block mb-1.5`}>
+                    Page Background
+                  </label>
+                  <div className="grid grid-cols-2 gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setExportPaperStyle('white')}
+                      className={`px-3 py-2 rounded-xl border text-xs font-bold transition-all ${
+                        exportPaperStyle === 'white'
+                          ? 'bg-amber-500/15 border-amber-500 text-amber-500'
+                          : `${uiBtnBg} ${uiBorder} ${uiTextMuted}`
+                      }`}
+                    >
+                      White Paper (Ink-Safe)
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setExportPaperStyle('screen')}
+                      className={`px-3 py-2 rounded-xl border text-xs font-bold transition-all ${
+                        exportPaperStyle === 'screen'
+                          ? 'bg-amber-500/15 border-amber-500 text-amber-500'
+                          : `${uiBtnBg} ${uiBorder} ${uiTextMuted}`
+                      }`}
+                    >
+                      Match Screen Theme
+                    </button>
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-4 pt-1">
+                  <label className={`flex items-center gap-2 text-xs ${uiText} cursor-pointer select-none`}>
+                    <input
+                      type="checkbox"
+                      checked={exportShowVerseNumbers}
+                      onChange={(e) => setExportShowVerseNumbers(e.target.checked)}
+                      className="accent-amber-500 rounded"
+                    />
+                    Verse Numbers
+                  </label>
+                  <label className={`flex items-center gap-2 text-xs ${uiText} cursor-pointer select-none`}>
+                    <input
+                      type="checkbox"
+                      checked={exportOneVersePerLine}
+                      onChange={(e) => setExportOneVersePerLine(e.target.checked)}
+                      className="accent-amber-500 rounded"
+                    />
+                    One Verse Per Line
+                  </label>
+                </div>
+              </div>
+
+              <div className="flex flex-col gap-2">
+                <button
+                  type="button"
+                  onClick={handlePrintPdfExport}
+                  className="w-full bg-amber-600 hover:bg-amber-500 text-white font-bold py-3 rounded-xl text-xs uppercase tracking-widest transition-all active:scale-95 flex items-center justify-center gap-2"
+                >
+                  <Printer size={15} /> Print / Save as PDF
+                </button>
+                <button
+                  type="button"
+                  onClick={handleSaveHtmlExport}
+                  className={`w-full ${uiBtnBg} ${uiBtnHover} ${uiText} border ${uiBorder} font-bold py-3 rounded-xl text-xs uppercase tracking-widest transition-all active:scale-95 flex items-center justify-center gap-2`}
+                >
+                  <FileDown size={15} /> Save Printable HTML Handout
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      <AnimatePresence>
         {appMode === 'control' && !readingMode && (
           <motion.div 
             key="control-header"
@@ -2553,6 +3176,13 @@ export default function App() {
                   title="Load Passage Markup (.glide)"
                 >
                   <FolderOpen size={18} />
+                </button>
+                <button 
+                  onClick={() => openExportModal('current')}
+                  className={`p-2 ${uiBtnBg} border ${uiBorder} rounded-lg ${uiTextMuted} hover:text-amber-500 ${uiBtnHover} transition-all flex items-center justify-center`}
+                  title="Export Marked-Up Passage (PDF / HTML)"
+                >
+                  <FileDown size={18} />
                 </button>
                 <div className={`w-px h-6 ${uiTheme === 'dark' ? 'bg-slate-700' : 'bg-slate-200'} mx-1`} />
                 <button 
@@ -2971,6 +3601,13 @@ export default function App() {
                           <Save size={13} className="text-amber-500 shrink-0" />
                           <span className={`text-xs font-semibold ${uiText}`}>Save Set As...</span>
                         </button>
+                        <button
+                          onClick={() => openExportModal('all')}
+                          className={`w-full text-left px-2.5 py-2 rounded-lg ${uiBtnHover} transition-colors flex items-center gap-2`}
+                        >
+                          <FileDown size={13} className="text-amber-500 shrink-0" />
+                          <span className={`text-xs font-semibold ${uiText}`}>Export Set (PDF / HTML)...</span>
+                        </button>
                       </motion.div>
                     )}
                   </AnimatePresence>
@@ -3091,6 +3728,7 @@ export default function App() {
           onInput={() => appMode === 'control' && syncStateToStorage({ index: activeVerseIndex, forceDomRead: true })}
           onMouseUp={() => appMode === 'control' && applyActiveTool()}
           onDrop={(e) => {
+            if (e.dataTransfer?.files && e.dataTransfer.files.length > 0) return;
             if (appMode === 'control') {
               e.preventDefault();
               return false;
@@ -3152,6 +3790,7 @@ export default function App() {
                       suppressContentEditableWarning={true} 
                       dangerouslySetInnerHTML={{ __html: (verse.html || verse.text) + (isRtl ? '' : '\u200E') }}
                       onDrop={(e) => {
+                        if (e.dataTransfer?.files && e.dataTransfer.files.length > 0) return;
                         e.preventDefault();
                         return false;
                       }}
@@ -3411,5 +4050,104 @@ export default function App() {
         )}
       </AnimatePresence>
     </div>
+
+    {exportPrintSnapshot && (
+      <div
+        id="scriptureglide-print-sheet"
+        className="hidden print:block w-full min-h-screen p-4"
+        style={{
+          backgroundColor: exportPrintSnapshot.paperStyle === 'white' ? '#ffffff' : settings.pageColor,
+          color: exportPrintSnapshot.paperStyle === 'white' ? '#0f172a' : (settings.theme === 'dark' ? '#f8fafc' : '#0f172a'),
+          fontFamily: activeFont.css
+        }}
+      >
+        {exportPrintSnapshot.sessions.map((session, sIdx) => {
+          const isRtl = session.translation === 'wlc';
+          const baseFontSize = Math.min(Math.max(Math.round(settings.textSize * 0.5), 14), 22);
+          return (
+            <section
+              key={session.id}
+              dir={isRtl ? 'rtl' : 'ltr'}
+              className="mb-10"
+              style={sIdx > 0 ? { breakBefore: 'page', pageBreakBefore: 'always' } : undefined}
+            >
+              <header
+                className="flex justify-between items-baseline gap-4 pb-2.5 mb-5 border-b-2 font-sans"
+                style={{
+                  borderColor: exportPrintSnapshot.paperStyle === 'white'
+                    ? '#e2e8f0'
+                    : (settings.theme === 'dark' ? '#334155' : '#cbd5e1')
+                }}
+              >
+                <h1 className="text-xl font-bold">{session.name}</h1>
+                <span className="text-[11px] font-bold uppercase tracking-widest opacity-60 shrink-0">
+                  {session.translation.toUpperCase()} • {session.verses.length} verse{session.verses.length === 1 ? '' : 's'}
+                </span>
+              </header>
+              <div
+                style={{
+                  fontSize: `${baseFontSize}px`,
+                  lineHeight: Math.max(settings.textSpacing, 1.65)
+                }}
+              >
+                {session.verses.map((verse, vIdx) => {
+                  const verseNumber = getExportPassageNumber(verse, vIdx);
+                  const blockMode = exportPrintSnapshot.oneVersePerLine || verse.isNewChapter || verse.acrostic;
+                  return (
+                    <React.Fragment key={`${session.id}-${verse.id}-${vIdx}`}>
+                      {verse.bookHeader && settings.showBookHeader !== false && (
+                        <div className="w-full text-center py-4 opacity-50">
+                          <h2 className="text-2xl font-bold uppercase tracking-widest">{verse.bookHeader}</h2>
+                        </div>
+                      )}
+                      {(verse.isNewPassage || verse.isNewChapter) && <div className="h-3 w-full" />}
+                      {blockMode ? (
+                        <div className="mb-3">
+                          {verse.acrostic && (
+                            <div className="text-[0.7em] tracking-[0.25em] uppercase italic opacity-60 mb-1">
+                              {verse.acrostic}
+                            </div>
+                          )}
+                          <div className="flex gap-2.5 items-baseline">
+                            {exportPrintSnapshot.showVerseNumbers && (
+                              <span
+                                className="font-bold text-[0.72em] shrink-0"
+                                style={{ color: settings.verseNumberColor || '#d97706' }}
+                              >
+                                {verseNumber}
+                              </span>
+                            )}
+                            <span
+                              dir="auto"
+                              dangerouslySetInnerHTML={{ __html: (verse.html || verse.text).replace(/\u200E/g, '') }}
+                            />
+                          </div>
+                        </div>
+                      ) : (
+                        <span className="inline">
+                          {exportPrintSnapshot.showVerseNumbers && (
+                            <span
+                              className="font-bold text-[0.72em] align-super mr-1"
+                              style={{ color: settings.verseNumberColor || '#d97706' }}
+                            >
+                              {verseNumber}
+                            </span>
+                          )}
+                          <span
+                            dir="auto"
+                            dangerouslySetInnerHTML={{ __html: (verse.html || verse.text).replace(/\u200E/g, '') }}
+                          />{' '}
+                        </span>
+                      )}
+                    </React.Fragment>
+                  );
+                })}
+              </div>
+            </section>
+          );
+        })}
+      </div>
+    )}
+    </>
   );
 }
