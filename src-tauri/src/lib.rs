@@ -78,24 +78,67 @@ fn set_state(state: serde_json::Value, app_state: State<AppState>, app: AppHandl
     app.emit("state-changed", state).unwrap();
 }
 
+fn is_same_monitor(a: &tauri::Monitor, b: &tauri::Monitor) -> bool {
+    a.position().x == b.position().x
+        && a.position().y == b.position().y
+        && a.size().width == b.size().width
+        && a.size().height == b.size().height
+        && a.name() == b.name()
+}
+
+fn resolve_target_monitor(app: &AppHandle, monitor_index: Option<usize>) -> Option<tauri::Monitor> {
+    let monitors = app.available_monitors().unwrap_or_default();
+    if monitors.is_empty() {
+        return app.primary_monitor().ok().flatten();
+    }
+    if let Some(idx) = monitor_index {
+        if let Some(m) = monitors.get(idx) {
+            return Some(m.clone());
+        }
+    }
+    if let Ok(Some(primary)) = app.primary_monitor() {
+        if let Some(non_primary) = monitors.iter().find(|m| !is_same_monitor(m, &primary)) {
+            return Some(non_primary.clone());
+        }
+    }
+    monitors.get(1).or_else(|| monitors.first()).cloned()
+}
+
+fn move_window_to_monitor_fullscreen(window: &tauri::WebviewWindow, target: &tauri::Monitor) {
+    let pos = *target.position();
+    let size = *target.size();
+    let safe_w = (size.width / 2).max(200);
+    let safe_h = (size.height / 2).max(200);
+    // Use an interior rect strictly inside `target` (away from the x == pos.x shared border with Monitor 0)
+    // so Windows MonitorFromWindow and tao's inclusive monitor bounds never snap to the primary monitor.
+    let safe_x = pos.x + ((size.width as i32 - safe_w as i32) / 2);
+    let safe_y = pos.y + ((size.height as i32 - safe_h as i32) / 2);
+
+    let _ = window.set_fullscreen(false);
+    let _ = window.set_size(tauri::Size::Physical(tauri::PhysicalSize::new(safe_w, safe_h)));
+    let _ = window.set_position(tauri::Position::Physical(tauri::PhysicalPosition::new(safe_x, safe_y)));
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    let _ = window.set_fullscreen(true);
+    let _ = window.show();
+    let _ = window.set_focus();
+}
+
 #[tauri::command]
 async fn open_presentation_window(app: AppHandle, monitor_index: Option<usize>) {
+    let Some(target_monitor) = resolve_target_monitor(&app, monitor_index) else {
+        return;
+    };
+
     if let Some(window) = app.get_webview_window("presentation") {
-        window.set_focus().unwrap();
+        move_window_to_monitor_fullscreen(&window, &target_monitor);
     } else {
-        // Detect monitors
-        let monitors = app.available_monitors().unwrap_or_default();
-        
-        // Use requested monitor, or second monitor if available, otherwise primary
-        let target_monitor = if let Some(idx) = monitor_index {
-            monitors.get(idx).or(monitors.get(1)).unwrap_or(&monitors[0])
-        } else if monitors.len() > 1 {
-            &monitors[1]
-        } else {
-            &monitors[0]
-        };
-        
-        let pos = target_monitor.position();
+        let pos = *target_monitor.position();
+        let size = *target_monitor.size();
+        let scale = target_monitor.scale_factor().max(1.0);
+        let safe_w = (size.width / 2).max(200);
+        let safe_h = (size.height / 2).max(200);
+        let safe_x = pos.x + ((size.width as i32 - safe_w as i32) / 2);
+        let safe_y = pos.y + ((size.height as i32 - safe_h as i32) / 2);
 
         let window = WebviewWindowBuilder::new(
             &app,
@@ -103,16 +146,19 @@ async fn open_presentation_window(app: AppHandle, monitor_index: Option<usize>) 
             WebviewUrl::App("?view=presentation".into())
         )
         .title("Scripture Presentation")
-        .position(pos.x as f64, pos.y as f64)
-        .fullscreen(true)
+        .visible(false)
         .decorations(false)
+        .position((safe_x as f64) / scale, (safe_y as f64) / scale)
+        .inner_size((safe_w as f64) / scale, (safe_h as f64) / scale)
         .build()
         .unwrap();
+
+        move_window_to_monitor_fullscreen(&window, &target_monitor);
 
         let app_handle = app.clone();
         window.on_window_event(move |event| {
             if let tauri::WindowEvent::CloseRequested { .. } = event {
-                app_handle.emit("presentation-closed", ()).unwrap();
+                let _ = app_handle.emit("presentation-closed", ());
             }
         });
     }
@@ -128,12 +174,21 @@ async fn close_presentation_window(app: AppHandle) {
 #[tauri::command]
 async fn list_monitors(app: AppHandle) -> Vec<serde_json::Value> {
     let monitors = app.available_monitors().unwrap_or_default();
+    let primary = app.primary_monitor().ok().flatten();
     monitors.iter().enumerate().map(|(i, m)| {
+        let is_primary = primary
+            .as_ref()
+            .map(|p| is_same_monitor(m, p))
+            .unwrap_or(i == 0);
         serde_json::json!({
             "index": i,
             "name": m.name().unwrap_or(&format!("Monitor {}", i)),
             "width": m.size().width,
-            "height": m.size().height
+            "height": m.size().height,
+            "x": m.position().x,
+            "y": m.position().y,
+            "scaleFactor": m.scale_factor(),
+            "isPrimary": is_primary
         })
     }).collect()
 }

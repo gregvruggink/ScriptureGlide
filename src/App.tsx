@@ -688,10 +688,24 @@ export default function App() {
       console.log('Starting Tauri Bridge initialization...');
       for (let i = 0; i < 20; i++) {
         try {
-          const m = await invoke('list_monitors');
+          const m = (await invoke('list_monitors')) as any[];
           console.log('Bridge found via try-call! Fetching hardware info...');
           setIsTauriApp(true);
-          setAvailableMonitors(m as any[]);
+          setAvailableMonitors(m);
+          if (Array.isArray(m) && m.length > 0) {
+            let hasSavedMonitor = false;
+            try {
+              const savedState = localStorage.getItem('osb_state');
+              const parsed = savedState ? JSON.parse(savedState) : null;
+              hasSavedMonitor = typeof parsed?.settings?.targetMonitor === 'number' && parsed.settings.targetMonitor < m.length;
+            } catch {}
+            if (!hasSavedMonitor) {
+              const externalMonitor = m.find(mon => !mon.isPrimary) || m[0];
+              if (externalMonitor) {
+                setSettings(prev => ({ ...prev, targetMonitor: externalMonitor.index }));
+              }
+            }
+          }
           checkForUpdates(false);
           setBridgeError(null);
 
@@ -3488,13 +3502,19 @@ export default function App() {
                       <label className={`text-[9px] font-bold uppercase tracking-widest ${uiTheme === 'dark' ? 'text-slate-400' : 'text-slate-500'}`}>Target Monitor</label>
                       <select 
                         value={settings.targetMonitor} 
-                        onChange={(e) => setSettings({...settings, targetMonitor: parseInt(e.target.value)})}
+                        onChange={(e) => {
+                          const nextIndex = parseInt(e.target.value, 10);
+                          setSettings({...settings, targetMonitor: nextIndex});
+                          if (isPresenting && isTauriApp) {
+                            invoke('open_presentation_window', { monitorIndex: nextIndex }).catch(err => console.error('Failed to switch monitor:', err));
+                          }
+                        }}
                         className={`w-full p-2 ${uiTheme === 'dark' ? 'bg-slate-800' : 'bg-white'} border ${uiBorder} rounded text-xs ${uiText} focus:ring-1 focus:ring-amber-500 outline-none shadow-sm`}
                       >
                         {availableMonitors.length > 0 ? (
                           availableMonitors.map(m => (
                             <option key={m.index} value={m.index}>
-                              {m.name.replace(/^.*DISPLAY/i, 'Display ')} ({m.width}x{m.height})
+                              {m.name.replace(/^.*DISPLAY/i, 'Display ')} ({m.width}x{m.height}){m.isPrimary ? ' — Main / Primary' : (typeof m.x === 'number' ? ` — External @ ${m.x}, ${m.y}` : ' — External')}
                             </option>
                           ))
                         ) : (
@@ -3504,6 +3524,11 @@ export default function App() {
                           </>
                         )}
                       </select>
+                      {availableMonitors.length > 1 && availableMonitors.every(m => m.x === availableMonitors[0].x && m.y === availableMonitors[0].y) && (
+                        <p className="text-[10px] text-amber-500 leading-snug">
+                          Windows reports all monitors at the same desktop position (Mirrored). Set displays to Extend in Windows Display Settings to separate the projector from the main screen.
+                        </p>
+                      )}
                     </div>
                   </div>
 
