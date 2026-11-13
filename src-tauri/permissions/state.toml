@@ -8,5 +8,7 @@ commands.allow = [
   "close_presentation_window",
   "list_monitors",
   "fetch_youversion",
-  "fetch_url"
+  "fetch_url",
+  "take_pending_open_files",
+  "read_glide_file"
 ]

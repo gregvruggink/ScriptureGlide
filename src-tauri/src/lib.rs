@@ -19,7 +19,7 @@ fn is_supported_glide_path(path: &Path) -> bool {
 }
 
 fn handle_external_file_path(app: &AppHandle, raw_path: &str) {
-    let trimmed = raw_path.trim();
+    let trimmed = raw_path.trim().trim_matches('"').trim();
     if trimmed.is_empty() {
         return;
     }
@@ -59,7 +59,8 @@ fn take_pending_open_files(state: State<AppState>) -> Vec<String> {
 
 #[tauri::command]
 fn read_glide_file(path: String) -> Result<String, String> {
-    let file_path = Path::new(path.trim());
+    let cleaned = path.trim().trim_matches('"').trim();
+    let file_path = Path::new(cleaned);
     if !is_supported_glide_path(file_path) {
         return Err("Unsupported file type. Expected a .glide or .json file.".to_string());
     }

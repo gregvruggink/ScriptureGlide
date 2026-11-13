@@ -322,7 +322,14 @@ interface ScriptureSession {
 }
 
 export default function App() {
-  const [appMode, setAppMode] = useState<'select' | 'control' | 'present'>('select');
+  const [appMode, setAppMode] = useState<'select' | 'control' | 'present'>(() => {
+    try {
+      const params = new URLSearchParams(window.location.search);
+      return params.get('view') === 'presentation' ? 'present' : 'select';
+    } catch {
+      return 'select';
+    }
+  });
   const [displayMode, setDisplayMode] = useState<'single' | 'dual'>(() => {
     try { return (localStorage.getItem('osb_display_mode') as 'single' | 'dual') || 'single'; } catch { return 'single'; }
   });
@@ -1220,8 +1227,10 @@ export default function App() {
     }
   }, [openExternalGlidePayload, showLoadErrorMessage]);
 
+  const isPresentMode = appMode === 'present';
+
   useEffect(() => {
-    if (!isTauriApp || appMode === 'present') return;
+    if (!isTauriApp || isPresentMode) return;
 
     let cancelled = false;
     let unlistenOpenFile: UnlistenFn | undefined;
@@ -1234,7 +1243,9 @@ export default function App() {
           void openGlideFileFromPath(p);
         }
       })
-      .catch(() => {});
+      .catch((err) => {
+        console.error('Failed to read startup .glide file arguments:', err);
+      });
 
     listen<string>('open-glide-file', (event) => {
       if (cancelled || !event.payload) return;
@@ -1266,14 +1277,16 @@ export default function App() {
     }).then((fn) => {
       if (cancelled) fn();
       else unlistenDragDrop = fn;
-    }).catch(() => {});
+    }).catch((err) => {
+      console.error('Failed to register drag-and-drop listener:', err);
+    });
 
     return () => {
       cancelled = true;
       if (unlistenOpenFile) unlistenOpenFile();
       if (unlistenDragDrop) unlistenDragDrop();
     };
-  }, [isTauriApp, appMode, openGlideFileFromPath, showLoadErrorMessage]);
+  }, [isTauriApp, isPresentMode, openGlideFileFromPath, showLoadErrorMessage]);
 
   const handleBrowserDragOver = (e: React.DragEvent<HTMLDivElement>) => {
     if (isTauriApp || appMode === 'present') return;
