@@ -37,9 +37,10 @@ import {
   ChevronLeft,
   ChevronRight,
   Plus,
-  Library
+  Library,
+  GripVertical
 } from 'lucide-react';
-import { motion, AnimatePresence } from 'motion/react';
+import { motion, AnimatePresence, Reorder } from 'motion/react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen, UnlistenFn } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
@@ -367,11 +368,79 @@ export default function App() {
     }
   });
 
+  const [currentSetFilePath, setCurrentSetFilePath] = useState<string | null>(() => {
+    try {
+      return localStorage.getItem('osb_set_file_path') || null;
+    } catch {
+      return null;
+    }
+  });
+
+  const [currentSetName, setCurrentSetName] = useState<string | null>(() => {
+    try {
+      return localStorage.getItem('osb_set_name') || null;
+    } catch {
+      return null;
+    }
+  });
+
+  const [hasUnsavedSetChanges, setHasUnsavedSetChanges] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem('osb_set_dirty') === 'true';
+    } catch {
+      return false;
+    }
+  });
+
+  const [showLibrarySetMenu, setShowLibrarySetMenu] = useState(false);
+  const [showUnsavedSetModal, setShowUnsavedSetModal] = useState(false);
+  const librarySetMenuRef = useRef<HTMLDivElement>(null);
+  const browserSetInputRef = useRef<HTMLInputElement>(null);
+  const pendingBrowserLoadModeRef = useRef<'replace' | 'append'>('replace');
+
   useEffect(() => {
     try {
       localStorage.setItem('osb_sessions', JSON.stringify(sessions));
     } catch (e) {}
   }, [sessions]);
+
+  useEffect(() => {
+    try {
+      if (currentSetFilePath) localStorage.setItem('osb_set_file_path', currentSetFilePath);
+      else localStorage.removeItem('osb_set_file_path');
+    } catch (e) {}
+  }, [currentSetFilePath]);
+
+  useEffect(() => {
+    try {
+      if (currentSetName) localStorage.setItem('osb_set_name', currentSetName);
+      else localStorage.removeItem('osb_set_name');
+    } catch (e) {}
+  }, [currentSetName]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem('osb_set_dirty', hasUnsavedSetChanges ? 'true' : 'false');
+    } catch (e) {}
+  }, [hasUnsavedSetChanges]);
+
+  useEffect(() => {
+    if (!showLibrarySetMenu) return;
+    const handleOutsideClick = (e: MouseEvent) => {
+      if (librarySetMenuRef.current && !librarySetMenuRef.current.contains(e.target as Node)) {
+        setShowLibrarySetMenu(false);
+      }
+    };
+    const handleEscape = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setShowLibrarySetMenu(false);
+    };
+    document.addEventListener('mousedown', handleOutsideClick);
+    document.addEventListener('keydown', handleEscape);
+    return () => {
+      document.removeEventListener('mousedown', handleOutsideClick);
+      document.removeEventListener('keydown', handleEscape);
+    };
+  }, [showLibrarySetMenu]);
 
   useEffect(() => {
     try {
@@ -405,6 +474,11 @@ export default function App() {
   useEffect(() => {
     activeSessionIdRef.current = activeSessionId;
   }, [activeSessionId]);
+
+  const sessionsRef = useRef(sessions);
+  useEffect(() => {
+    sessionsRef.current = sessions;
+  }, [sessions]);
 
   const setVerses = useCallback((newVerses: Verse[] | ((prev: Verse[]) => Verse[])) => {
     setSessions(prev => prev.map(s => {
@@ -461,6 +535,7 @@ export default function App() {
   }, []);
 
   const setTranslation = useCallback((newTrans: string | ((prev: string) => string)) => {
+    setHasUnsavedSetChanges(true);
     setSessions(prev => prev.map(s => {
       if (s.id === activeSessionIdRef.current) {
         const resolvedTrans = typeof newTrans === 'function' ? newTrans(s.translation) : newTrans;
@@ -488,12 +563,26 @@ export default function App() {
   }, []);
 
   const selectSession = useCallback((sessionId: string) => {
-    setActiveSessionId(sessionId);
+    if (sessionId === activeSessionIdRef.current) return;
     setSessions(prev => {
-      const targetSession = prev.find(s => s.id === sessionId);
+      let domDirty = false;
+      const flushed = prev.map(s => {
+        if (s.id !== activeSessionIdRef.current) return s;
+        const updatedVerses = s.verses.map((v, i) => {
+          const el = document.getElementById(`verse-${i}`);
+          if (!el) return v;
+          const html = el.innerHTML.replace(/\u200E/g, '');
+          if (v.html === html) return v;
+          domDirty = true;
+          return { ...v, html };
+        });
+        return domDirty ? { ...s, verses: updatedVerses } : s;
+      });
+      if (domDirty) setHasUnsavedSetChanges(true);
+
+      const targetSession = flushed.find(s => s.id === sessionId);
       if (targetSession) {
         setTimeout(() => {
-          // Send beacon / invoke state-changed
           const stateToSave = { 
             verses: targetSession.verses, 
             activeIndex: targetSession.activeVerseIndex, 
@@ -508,8 +597,9 @@ export default function App() {
           }
         }, 50);
       }
-      return prev;
+      return domDirty ? flushed : prev;
     });
+    setActiveSessionId(sessionId);
   }, [syncChannel, isTauriApp]);
 
   const [readingMode, setReadingMode] = useState(false);
@@ -813,9 +903,14 @@ export default function App() {
       if (selected && !Array.isArray(selected)) {
         const content = await readTextFile(selected);
         const data = JSON.parse(content);
+        const filename = selected.split(/[/\\]/).pop() || 'Loaded Study';
+
+        if (Array.isArray(data.sessions)) {
+          applyLoadedSetData(data, selected, filename, 'append');
+          return;
+        }
         
         if (data.verses) {
-          const filename = selected.split(/[/\\]/).pop() || 'Loaded Study';
           const newSessionId = `session-${Date.now()}`;
           const newSession: ScriptureSession = {
             id: newSessionId,
@@ -829,6 +924,8 @@ export default function App() {
 
           setSessions(prev => [...prev, newSession]);
           setActiveSessionId(newSessionId);
+          setResetKey(prev => prev + 1);
+          setHasUnsavedSetChanges(true);
           
           // Force a sync to storage/presentation
           setTimeout(() => syncStateToStorage({ 
@@ -842,6 +939,217 @@ export default function App() {
       const { message } = await import('@tauri-apps/plugin-dialog');
       await message(`Failed to load: ${err.message || err}`, { title: 'Load Error', kind: 'error' });
     }
+  };
+
+  const getLatestSessionsSnapshot = useCallback((): ScriptureSession[] => {
+    return sessionsRef.current.map(s => {
+      if (s.id !== activeSessionIdRef.current) return s;
+      const updatedVerses = s.verses.map((v, i) => {
+        const el = document.getElementById(`verse-${i}`);
+        if (!el) return v;
+        const html = el.innerHTML.replace(/\u200E/g, '');
+        return v.html === html ? v : { ...v, html };
+      });
+      return { ...s, verses: updatedVerses };
+    });
+  }, []);
+
+  const saveSet = async (forceSaveAs = false): Promise<boolean> => {
+    try {
+      const latestSessions = getLatestSessionsSnapshot();
+      const hasDomUpdates = latestSessions.some((s, idx) => s !== sessionsRef.current[idx]);
+      if (hasDomUpdates) {
+        setSessions(latestSessions);
+      }
+
+      const buildPayload = (setNameLabel: string) => ({
+        type: 'scriptureglide-set',
+        version: '2.0',
+        setName: setNameLabel,
+        sessions: latestSessions,
+        activeSessionId: activeSessionIdRef.current,
+        settings
+      });
+
+      if (!isTauriApp) {
+        const baseName = (currentSetName || 'ScriptureGlide-Set').replace(/\.glide$/i, '');
+        const blob = new Blob([JSON.stringify(buildPayload(baseName), null, 2)], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `${baseName}.glide`;
+        a.click();
+        URL.revokeObjectURL(url);
+        setCurrentSetName(baseName);
+        setHasUnsavedSetChanges(false);
+        return true;
+      }
+
+      const { save } = await import('@tauri-apps/plugin-dialog');
+      const { writeTextFile } = await import('@tauri-apps/plugin-fs');
+
+      let filePath = !forceSaveAs ? currentSetFilePath : null;
+      if (!filePath) {
+        filePath = await save({
+          defaultPath: currentSetFilePath || `${(currentSetName || 'ScriptureGlide Set').replace(/\.glide$/i, '')}.glide`,
+          filters: [{
+            name: 'ScriptureGlide Set',
+            extensions: ['glide']
+          }]
+        }) || null;
+      }
+
+      if (!filePath) return false;
+
+      const filename = filePath.split(/[/\\]/).pop() || 'ScriptureGlide Set';
+      const cleanName = filename.replace(/\.glide$/i, '');
+      await writeTextFile(filePath, JSON.stringify(buildPayload(cleanName), null, 2));
+
+      setCurrentSetFilePath(filePath);
+      setCurrentSetName(cleanName);
+      setHasUnsavedSetChanges(false);
+      return true;
+    } catch (err: any) {
+      console.error('Failed to save set:', err);
+      if (isTauriApp) {
+        const { message } = await import('@tauri-apps/plugin-dialog');
+        await message(`Failed to save set: ${err.message || err}`, { title: 'Save Error', kind: 'error' });
+      } else {
+        alert(`Failed to save set: ${err.message || err}`);
+      }
+      return false;
+    }
+  };
+
+  const applyLoadedSetData = (data: any, filePath: string | null, filename: string, mode: 'replace' | 'append') => {
+    const normalizeSession = (raw: any, index: number, forceNewId: boolean): ScriptureSession => {
+      const versesArr: Verse[] = Array.isArray(raw?.verses) ? raw.verses : [];
+      const firstRef = versesArr[0]?.reference || 'Genesis 1:1';
+      const fallbackRefInput = firstRef.includes(':') ? firstRef.split(':')[0] : firstRef;
+      return {
+        id: forceNewId || !raw?.id ? `session-${Date.now()}-${index}-${Math.random().toString(36).slice(2, 6)}` : String(raw.id),
+        name: typeof raw?.name === 'string' && raw.name.trim() ? raw.name : `Passage ${index + 1}`,
+        verses: versesArr,
+        translation: typeof raw?.translation === 'string' && raw.translation ? raw.translation : 'esv',
+        activeVerseIndex: typeof raw?.activeVerseIndex === 'number' ? raw.activeVerseIndex : 0,
+        referenceInput: typeof raw?.referenceInput === 'string' && raw.referenceInput ? raw.referenceInput : fallbackRefInput,
+        filePath: typeof raw?.filePath === 'string' ? raw.filePath : undefined
+      };
+    };
+
+    let importedSessions: ScriptureSession[] = [];
+    const isSetPayload = Array.isArray(data?.sessions);
+
+    if (isSetPayload) {
+      const seenIds = new Set<string>();
+      importedSessions = data.sessions.map((raw: any, idx: number) => {
+        const needsNewId = mode === 'append' || !raw?.id || seenIds.has(String(raw.id));
+        const normalized = normalizeSession(raw, idx, needsNewId);
+        seenIds.add(normalized.id);
+        return normalized;
+      });
+    } else if (Array.isArray(data?.verses)) {
+      importedSessions = [
+        normalizeSession({
+          name: filename.replace(/\.glide$/i, ''),
+          verses: data.verses,
+          translation: data.translation || 'esv',
+          activeVerseIndex: 0,
+          filePath: filePath || undefined
+        }, 0, true)
+      ];
+    } else {
+      throw new Error('Unrecognized ScriptureGlide file format.');
+    }
+
+    if (importedSessions.length === 0) {
+      throw new Error('The selected file does not contain any passages.');
+    }
+
+    let targetSession = importedSessions[0];
+
+    if (mode === 'replace') {
+      if (isSetPayload && data.activeSessionId) {
+        const matched = importedSessions.find(s => s.id === data.activeSessionId);
+        if (matched) targetSession = matched;
+      }
+      setSessions(importedSessions);
+      setActiveSessionId(targetSession.id);
+      setResetKey(prev => prev + 1);
+      setCurrentSetFilePath(isSetPayload ? filePath : null);
+      setCurrentSetName(filename.replace(/\.glide$/i, ''));
+      setHasUnsavedSetChanges(false);
+    } else {
+      setSessions(prev => [...prev, ...importedSessions]);
+      setActiveSessionId(targetSession.id);
+      setResetKey(prev => prev + 1);
+      setHasUnsavedSetChanges(true);
+    }
+
+    setTimeout(() => syncStateToStorage({
+      verses: targetSession.verses,
+      index: targetSession.activeVerseIndex,
+      forceDomRead: false
+    }), 100);
+  };
+
+  const performLoadSet = async (mode: 'replace' | 'append') => {
+    try {
+      if (!isTauriApp) {
+        pendingBrowserLoadModeRef.current = mode;
+        browserSetInputRef.current?.click();
+        return;
+      }
+
+      const { open } = await import('@tauri-apps/plugin-dialog');
+      const { readTextFile } = await import('@tauri-apps/plugin-fs');
+
+      const selected = await open({
+        multiple: false,
+        filters: [{
+          name: 'ScriptureGlide Set / Markup',
+          extensions: ['glide', 'json']
+        }]
+      });
+
+      if (selected && !Array.isArray(selected)) {
+        const content = await readTextFile(selected);
+        const data = JSON.parse(content);
+        const filename = selected.split(/[/\\]/).pop() || 'Loaded Set';
+        applyLoadedSetData(data, selected, filename, mode);
+      }
+    } catch (err: any) {
+      console.error('Failed to load set:', err);
+      if (isTauriApp) {
+        const { message } = await import('@tauri-apps/plugin-dialog');
+        await message(`Failed to load set: ${err.message || err}`, { title: 'Load Error', kind: 'error' });
+      } else {
+        alert(`Failed to load set: ${err.message || err}`);
+      }
+    }
+  };
+
+  const handleBrowserSetFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file) return;
+    try {
+      const content = await file.text();
+      const data = JSON.parse(content);
+      applyLoadedSetData(data, null, file.name, pendingBrowserLoadModeRef.current);
+    } catch (err: any) {
+      console.error('Failed to load set file:', err);
+      alert(`Failed to load set: ${err.message || err}`);
+    }
+  };
+
+  const requestLoadSet = (mode: 'replace' | 'append') => {
+    setShowLibrarySetMenu(false);
+    if (mode === 'replace' && hasUnsavedSetChanges) {
+      setShowUnsavedSetModal(true);
+      return;
+    }
+    performLoadSet(mode);
   };
   const stateRef = useRef({ activeVerseIndex, verses, settings, translation });
 
@@ -930,6 +1238,7 @@ export default function App() {
       const hasChanged = currentVerses.some((v, i) => v.html !== stateRef.current.verses[i].html);
       if (hasChanged) {
         setVerses(currentVerses);
+        setHasUnsavedSetChanges(true);
       }
     }
 
@@ -1363,6 +1672,7 @@ export default function App() {
 
     // Step 3: Sync React state and force remount
     setVerses(cleanVerses);
+    setHasUnsavedSetChanges(true);
     setResetKey(prev => prev + 1);
 
     // Step 4: Persist — this was the missing call
@@ -1432,6 +1742,7 @@ export default function App() {
     const emptyVerses: Verse[] = [];
     setVerses(emptyVerses);
     setActiveVerseIndex(0);
+    setHasUnsavedSetChanges(true);
     setResetKey(prev => prev + 1);
     syncStateToStorage({ index: 0, verses: emptyVerses, forceDomRead: true });
   }, [syncStateToStorage]);
@@ -1451,6 +1762,7 @@ export default function App() {
 
     setVerses(newVerses);
     setActiveVerseIndex(0);
+    setHasUnsavedSetChanges(true);
     setAppMode('control');
     setShowCustomTextModal(false);
     setCustomTextValue("");
@@ -1819,6 +2131,7 @@ export default function App() {
       const finalVerses = isAppend ? [...verses, ...fetchedVerses] : fetchedVerses;
       
       setVerses(finalVerses);
+      setHasUnsavedSetChanges(true);
       if (!isAppend || verses.length === 0) {
         setActiveVerseIndex(0);
         syncStateToStorage({ index: 0, verses: finalVerses, forceDomRead: false });
@@ -2100,6 +2413,80 @@ export default function App() {
                   </button>
                 </div>
               </form>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      <input
+        ref={browserSetInputRef}
+        type="file"
+        accept=".glide,.json"
+        className="hidden"
+        onChange={handleBrowserSetFileChange}
+      />
+
+      <AnimatePresence>
+        {showUnsavedSetModal && (
+          <div className="fixed inset-0 z-[310] flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-md">
+            <motion.div
+              initial={{ opacity: 0, scale: 0.94, y: 12 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.94, y: 12 }}
+              className={`w-full max-w-md ${uiBg} border ${uiBorder} rounded-3xl shadow-2xl p-6 overflow-hidden font-sans`}
+            >
+              <div className="flex items-start justify-between gap-4 mb-4">
+                <div>
+                  <span className="text-[10px] font-bold uppercase tracking-[0.25em] text-amber-500 block mb-1">
+                    Unsaved Library Set
+                  </span>
+                  <h3 className={`text-xl ${uiText} font-display font-black uppercase tracking-tight`}>
+                    Save before replacing?
+                  </h3>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setShowUnsavedSetModal(false)}
+                  className={`w-8 h-8 flex items-center justify-center rounded-full ${uiBtnBg} ${uiTextMuted} hover:text-amber-500 transition-colors`}
+                >
+                  <X size={16} />
+                </button>
+              </div>
+              <p className={`text-xs ${uiTextMuted} leading-relaxed mb-6`}>
+                Your current Library has unsaved passages or markup{currentSetName ? ` (${currentSetName})` : ''}. Do you want to save this set before replacing it?
+              </p>
+              <div className="flex flex-col gap-2">
+                <button
+                  type="button"
+                  onClick={async () => {
+                    const saved = await saveSet(false);
+                    if (saved) {
+                      setShowUnsavedSetModal(false);
+                      performLoadSet('replace');
+                    }
+                  }}
+                  className="w-full bg-amber-600 hover:bg-amber-500 text-white font-bold py-3 rounded-xl text-xs uppercase tracking-widest transition-all active:scale-95 flex items-center justify-center gap-2"
+                >
+                  <Save size={14} /> Save &amp; Replace
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowUnsavedSetModal(false);
+                    performLoadSet('replace');
+                  }}
+                  className={`w-full ${uiBtnBg} ${uiBtnHover} ${uiText} border ${uiBorder} font-bold py-3 rounded-xl text-xs uppercase tracking-widest transition-all active:scale-95`}
+                >
+                  Replace Without Saving
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setShowUnsavedSetModal(false)}
+                  className={`w-full py-2.5 rounded-xl text-xs font-semibold ${uiTextMuted} hover:text-amber-500 transition-colors`}
+                >
+                  Cancel
+                </button>
+              </div>
             </motion.div>
           </div>
         )}
@@ -2508,18 +2895,86 @@ export default function App() {
               transition={{ duration: 0.2 }}
               className={`h-full border-r ${uiBorder} ${uiBg} flex flex-col flex-shrink-0 overflow-hidden font-sans z-50`}
             >
-              <div className="p-4 border-b border-slate-700/50 flex justify-between items-center">
-                <div className="flex items-center gap-2">
-                  <Library size={18} className="text-amber-500" />
-                  <span className={`font-display font-black uppercase tracking-wider text-sm ${uiText}`}>Library</span>
+              <div className="p-3.5 border-b border-slate-700/50 flex justify-between items-center relative">
+                <div className="flex items-center gap-2 min-w-0">
+                  <Library size={17} className="text-amber-500 shrink-0" />
+                  <div className="flex flex-col min-w-0">
+                    <span className={`font-display font-black uppercase tracking-wider text-sm leading-tight ${uiText}`}>Library</span>
+                    {(currentSetName || hasUnsavedSetChanges) && (
+                      <span className={`text-[9px] truncate ${hasUnsavedSetChanges ? 'text-amber-500' : uiTextMuted}`}>
+                        {currentSetName || 'Unsaved set'}{hasUnsavedSetChanges ? ' • unsaved' : ''}
+                      </span>
+                    )}
+                  </div>
                 </div>
-                <button
-                  onClick={() => setSidebarOpen(false)}
-                  className={`p-1.5 rounded-lg ${uiBtnHover} ${uiTextMuted} hover:text-amber-500 transition-colors`}
-                  title="Close Sidebar"
-                >
-                  <ChevronLeft size={16} />
-                </button>
+                <div className="flex items-center gap-1 shrink-0" ref={librarySetMenuRef}>
+                  <button
+                    onClick={() => saveSet(false)}
+                    className={`relative p-1.5 rounded-lg ${uiBtnHover} ${uiTextMuted} hover:text-amber-500 transition-colors`}
+                    title={currentSetFilePath ? `Save Set (${currentSetName || 'Current Set'})` : 'Save Passage Set (.glide)'}
+                  >
+                    <Save size={15} />
+                    {hasUnsavedSetChanges && (
+                      <span className="absolute top-1 right-1 w-1.5 h-1.5 rounded-full bg-amber-500" />
+                    )}
+                  </button>
+                  <button
+                    onClick={() => setShowLibrarySetMenu(prev => !prev)}
+                    className={`p-1.5 rounded-lg flex items-center gap-0.5 ${showLibrarySetMenu ? 'bg-amber-500/20 text-amber-500' : `${uiBtnHover} ${uiTextMuted} hover:text-amber-500`} transition-colors`}
+                    title="Open or Manage Passage Set"
+                  >
+                    <FolderOpen size={15} />
+                    <ChevronDown size={11} />
+                  </button>
+                  <button
+                    onClick={() => setSidebarOpen(false)}
+                    className={`p-1.5 rounded-lg ${uiBtnHover} ${uiTextMuted} hover:text-amber-500 transition-colors`}
+                    title="Close Sidebar"
+                  >
+                    <ChevronLeft size={16} />
+                  </button>
+
+                  <AnimatePresence>
+                    {showLibrarySetMenu && (
+                      <motion.div
+                        initial={{ opacity: 0, y: -6, scale: 0.97 }}
+                        animate={{ opacity: 1, y: 0, scale: 1 }}
+                        exit={{ opacity: 0, y: -6, scale: 0.97 }}
+                        transition={{ duration: 0.12 }}
+                        className={`absolute top-full right-2 mt-1 w-56 ${uiBg} border ${uiBorder} rounded-xl shadow-2xl p-1.5 z-[80] flex flex-col gap-0.5`}
+                      >
+                        <div className={`px-2.5 py-1 text-[9px] font-bold uppercase tracking-widest ${uiTextMuted}`}>
+                          Open Passage Set
+                        </div>
+                        <button
+                          onClick={() => requestLoadSet('replace')}
+                          className={`w-full text-left px-2.5 py-2 rounded-lg ${uiBtnHover} transition-colors flex flex-col`}
+                        >
+                          <span className={`text-xs font-semibold ${uiText}`}>Replace Current Set...</span>
+                          <span className={`text-[10px] ${uiTextMuted}`}>Clear library &amp; load saved group</span>
+                        </button>
+                        <button
+                          onClick={() => requestLoadSet('append')}
+                          className={`w-full text-left px-2.5 py-2 rounded-lg ${uiBtnHover} transition-colors flex flex-col`}
+                        >
+                          <span className={`text-xs font-semibold ${uiText}`}>Append to Current Set...</span>
+                          <span className={`text-[10px] ${uiTextMuted}`}>Add saved passages to library</span>
+                        </button>
+                        <div className={`h-px ${uiTheme === 'dark' ? 'bg-slate-700/70' : 'bg-slate-200'} my-1`} />
+                        <button
+                          onClick={() => {
+                            setShowLibrarySetMenu(false);
+                            saveSet(true);
+                          }}
+                          className={`w-full text-left px-2.5 py-2 rounded-lg ${uiBtnHover} transition-colors flex items-center gap-2`}
+                        >
+                          <Save size={13} className="text-amber-500 shrink-0" />
+                          <span className={`text-xs font-semibold ${uiText}`}>Save Set As...</span>
+                        </button>
+                      </motion.div>
+                    )}
+                  </AnimatePresence>
+                </div>
               </div>
 
               <div className="p-3 border-b border-slate-700/35 flex flex-col gap-2">
@@ -2536,6 +2991,7 @@ export default function App() {
                     };
                     setSessions(prev => [...prev, newSession]);
                     setActiveSessionId(newSessionId);
+                    setHasUnsavedSetChanges(true);
                   }}
                   className="w-full py-2 px-3 bg-amber-600 hover:bg-amber-500 text-white rounded-xl text-xs font-bold uppercase tracking-wider transition-all flex items-center justify-center gap-2 shadow-lg shadow-amber-900/20 active:scale-95"
                 >
@@ -2543,19 +2999,37 @@ export default function App() {
                 </button>
               </div>
 
-              <div className="flex-1 overflow-y-auto no-scrollbar p-2 space-y-1">
+              <Reorder.Group
+                as="div"
+                axis="y"
+                values={sessions}
+                onReorder={(newOrder) => {
+                  const orderChanged = newOrder.some((s, idx) => s.id !== sessions[idx]?.id);
+                  setSessions(newOrder);
+                  if (orderChanged) setHasUnsavedSetChanges(true);
+                }}
+                layoutScroll
+                className="flex-1 overflow-y-auto no-scrollbar p-2 space-y-1"
+              >
                 {sessions.map(session => {
                   const isActive = session.id === activeSessionId;
                   return (
-                    <div
+                    <Reorder.Item
+                      as="div"
                       key={session.id}
+                      value={session}
                       onClick={() => selectSession(session.id)}
-                      className={`group flex items-center justify-between p-3 rounded-xl cursor-pointer transition-all border ${
+                      whileDrag={{ scale: 1.02, zIndex: 30, boxShadow: '0 10px 25px rgba(0,0,0,0.35)' }}
+                      className={`group flex items-center justify-between gap-2 p-2.5 rounded-xl cursor-grab active:cursor-grabbing transition-colors border select-none ${
                         isActive
                           ? 'bg-amber-500/10 border-amber-500/30 text-amber-500 font-medium'
                           : `border-transparent ${uiTextMuted} hover:bg-slate-800/40 hover:text-white`
                       }`}
                     >
+                      <GripVertical
+                        size={14}
+                        className={`shrink-0 opacity-30 group-hover:opacity-75 transition-opacity ${isActive ? 'text-amber-500' : ''}`}
+                      />
                       <div className="flex flex-col min-w-0 flex-1">
                         <span className="text-xs truncate font-semibold">
                           {session.name}
@@ -2565,7 +3039,10 @@ export default function App() {
                         </span>
                       </div>
                       
-                      <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                      <div
+                        className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity shrink-0"
+                        onPointerDown={(e) => e.stopPropagation()}
+                      >
                         {session.filePath && (
                           <button
                             onClick={async (e) => {
@@ -2586,6 +3063,7 @@ export default function App() {
                               const index = sessions.findIndex(s => s.id === session.id);
                               const newSessions = sessions.filter(s => s.id !== session.id);
                               setSessions(newSessions);
+                              setHasUnsavedSetChanges(true);
                               if (isActive) {
                                 const nextActive = newSessions[Math.min(index, newSessions.length - 1)];
                                 selectSession(nextActive.id);
@@ -2598,10 +3076,10 @@ export default function App() {
                           </button>
                         )}
                       </div>
-                    </div>
+                    </Reorder.Item>
                   );
                 })}
-              </div>
+              </Reorder.Group>
             </motion.div>
           )}
         </AnimatePresence>
@@ -2620,7 +3098,7 @@ export default function App() {
           } }
         >
         <div className="h-[40vh] flex-shrink-0" />
-        <div key={resetKey} className={`mx-auto w-full transition-all duration-300 select-text ${settings.oneVersePerLine ? 'flex flex-col gap-8' : 'text-start tracking-wide'}`} style={{ fontSize: `${settings.textSize}px`, lineHeight: settings.textSpacing, paddingBottom: '40vh', maxWidth: `${settings.maxWidth}px` }} dir={translation === 'wlc' ? 'rtl' : 'ltr'}>
+        <div key={`${activeSessionId}-${resetKey}`} className={`mx-auto w-full transition-all duration-300 select-text ${settings.oneVersePerLine ? 'flex flex-col gap-8' : 'text-start tracking-wide'}`} style={{ fontSize: `${settings.textSize}px`, lineHeight: settings.textSpacing, paddingBottom: '40vh', maxWidth: `${settings.maxWidth}px` }} dir={translation === 'wlc' ? 'rtl' : 'ltr'}>
           {verses.map((verse, index) => {
             const fullRef = verse.reference.split(' ').pop() || '';
             const verseNumber = (index === 0 || verse.isNewChapter || verse.isNewPassage) ? fullRef : (fullRef.split(':')[1] || fullRef);
