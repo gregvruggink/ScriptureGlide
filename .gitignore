@@ -37,3 +37,6 @@ src-tauri/dump.json
 # OS files
 Thumbs.db
 db.ini
+
+# Netlify
+.netlify
