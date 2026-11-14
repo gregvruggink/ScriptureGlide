@@ -345,12 +345,12 @@ const POETIC_CHIASM_STEPS = [
 ];
 
 const POETIC_PARALLEL_STEPS = [
-  { tag: 'A', color: '#0d9488' },
-  { tag: "A'", color: '#0d9488' },
-  { tag: 'B', color: '#3b82f6' },
-  { tag: "B'", color: '#3b82f6' },
-  { tag: 'C', color: '#a855f7' },
-  { tag: "C'", color: '#a855f7' }
+  { tag: 'A1', color: '#0d9488' },
+  { tag: 'A2', color: '#0d9488' },
+  { tag: 'B1', color: '#3b82f6' },
+  { tag: 'B2', color: '#3b82f6' },
+  { tag: 'C1', color: '#a855f7' },
+  { tag: 'C2', color: '#a855f7' }
 ];
 
 const POETIC_LINK_META: Record<'inclusio' | 'parallel' | 'chiasm', { label: string; color: string; hint: string }> = {
@@ -5421,7 +5421,7 @@ export default function App() {
                         setPoeticStepIndex(0);
                       }}
                       className={`px-2 py-1 rounded-lg font-bold uppercase tracking-wider text-[10px] ${uiBtnBg} ${uiBtnHover} transition-colors`}
-                      title="Toggle sequence pattern (Chiasm A-B-C-B'-A' vs Parallel A-A'-B-B')"
+                      title="Toggle sequence pattern (Chiasm A-B-C-B'-A' vs Parallel A1-A2-B1-B2)"
                     >
                       {poeticSequenceMode === 'chiasm' ? "Chiasm" : "Parallel"}
                     </button>

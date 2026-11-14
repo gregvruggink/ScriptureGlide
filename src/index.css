@@ -89,6 +89,10 @@
     pointer-events: auto !important;
     display: block !important;
   }
+  .glide-print-sheet [data-verse-index] {
+    break-inside: avoid;
+    page-break-inside: avoid;
+  }
   * {
     -webkit-print-color-adjust: exact !important;
     print-color-adjust: exact !important;
