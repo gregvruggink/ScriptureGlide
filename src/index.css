@@ -78,6 +78,17 @@
     overflow: visible !important;
     background: transparent !important;
   }
+  .glide-print-sheet {
+    position: static !important;
+    left: auto !important;
+    top: auto !important;
+    width: 7.2in !important;
+    max-width: 100% !important;
+    margin: 0 auto !important;
+    visibility: visible !important;
+    pointer-events: auto !important;
+    display: block !important;
+  }
   * {
     -webkit-print-color-adjust: exact !important;
     print-color-adjust: exact !important;

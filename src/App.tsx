@@ -446,15 +446,19 @@ const PoeticGutterOverlay: React.FC<{
   const [arcs, setArcs] = useState<ComputedPoeticArc[]>([]);
   const [pendingStub, setPendingStub] = useState<ComputedPendingStub | null>(null);
   const [pills, setPills] = useState<ComputedPoeticPill[]>([]);
+  const [mountRetryTick, setMountRetryTick] = useState(0);
+  const attachedWrapperRef = useRef<HTMLDivElement | null>(null);
 
   useLayoutEffect(() => {
     const wrapper = wrapperRef.current;
     if (!wrapper) {
+      attachedWrapperRef.current = null;
       setArcs([]);
       setPendingStub(null);
       setPills([]);
       return;
     }
+    attachedWrapperRef.current = wrapper;
 
     const computeOverlay = () => {
       const wRect = wrapper.getBoundingClientRect();
@@ -636,6 +640,7 @@ const PoeticGutterOverlay: React.FC<{
     mo.observe(wrapper, { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ['data-glide-label', 'data-glide-tag', 'data-glide-anchor', 'style'] });
 
     window.addEventListener('resize', computeOverlay);
+    window.addEventListener('beforeprint', computeOverlay);
     const raf = requestAnimationFrame(computeOverlay);
 
     return () => {
@@ -643,8 +648,16 @@ const PoeticGutterOverlay: React.FC<{
       ro.disconnect();
       mo.disconnect();
       window.removeEventListener('resize', computeOverlay);
+      window.removeEventListener('beforeprint', computeOverlay);
     };
-  }, [wrapperRef, poeticLinks, pendingPoeticAnchor, activeVerseIndex, verseCount, isRtl, showLabels, isPoeticEditing, depsKey]);
+  }, [wrapperRef, poeticLinks, pendingPoeticAnchor, activeVerseIndex, verseCount, isRtl, showLabels, isPoeticEditing, depsKey, mountRetryTick]);
+
+  // Parent host refs attach after child useLayoutEffect on initial mount, so retry once when attached.
+  useEffect(() => {
+    if (wrapperRef.current && attachedWrapperRef.current !== wrapperRef.current) {
+      setMountRetryTick(t => t + 1);
+    }
+  });
 
   if (arcs.length === 0 && !pendingStub && pills.length === 0) return null;
 
@@ -794,6 +807,124 @@ interface ScriptureSession {
   poeticLinks?: PoeticLink[];
   verseLayout?: Record<string, VerseLayout>;
 }
+
+const PrintSessionBody: React.FC<{
+  session: ScriptureSession;
+  baseFontSize: number;
+  textSpacing: number;
+  showBookHeader: boolean;
+  showVerseNumbers: boolean;
+  oneVersePerLine: boolean;
+  verseNumberColor: string;
+  showPoeticLabels: boolean;
+  getPassageNumber: (v: Verse, i: number) => string;
+}> = ({
+  session,
+  baseFontSize,
+  textSpacing,
+  showBookHeader,
+  showVerseNumbers,
+  oneVersePerLine,
+  verseNumberColor,
+  showPoeticLabels,
+  getPassageNumber
+}) => {
+  const bodyRef = useRef<HTMLDivElement | null>(null);
+  const isRtl = session.translation === 'wlc';
+  const links = session.poeticLinks || [];
+  const hasAnnotations = links.length > 0 || session.verses.some(v => {
+    const html = v.html || '';
+    return html.includes('data-glide-label') || html.includes('data-glide-tag') || html.includes('data-glide-anchor');
+  });
+  const printGutterPx = links.length > 0 ? Math.min(168, 88 + Math.max(0, links.length - 1) * 18) : 0;
+  const lineHeight = hasAnnotations && showPoeticLabels ? Math.max(textSpacing, 2.15) : Math.max(textSpacing, 1.55);
+
+  return (
+    <div
+      ref={bodyRef}
+      className="relative"
+      style={{
+        fontSize: `${baseFontSize}px`,
+        lineHeight,
+        ...(hasAnnotations && showPoeticLabels ? { paddingTop: '12px' } : {}),
+        ...(printGutterPx > 0 ? (isRtl ? { paddingRight: `${printGutterPx}px` } : { paddingLeft: `${printGutterPx}px` }) : {})
+      }}
+    >
+      <PoeticGutterOverlay
+        wrapperRef={bodyRef}
+        poeticLinks={links}
+        pendingPoeticAnchor={null}
+        activeVerseIndex={0}
+        verseCount={session.verses.length}
+        isRtl={isRtl}
+        isControl={false}
+        showLabels={showPoeticLabels}
+        isPoeticEditing={true}
+        depsKey={`${session.id}-${baseFontSize}-${lineHeight}-${oneVersePerLine}-${JSON.stringify(session.verseLayout || {})}-${links.length}-${session.verses.map(v => v.html || v.text).join('\x00')}`}
+      />
+      {session.verses.map((verse, vIdx) => {
+        const verseNumber = getPassageNumber(verse, vIdx);
+        const vLayout = session.verseLayout?.[verse.id];
+        const indentLevel = vLayout?.indent || 0;
+        const stanzaBreak = !!vLayout?.stanzaBreakBefore;
+        const blockMode = oneVersePerLine || verse.isNewChapter || verse.acrostic || indentLevel > 0 || stanzaBreak;
+        return (
+          <React.Fragment key={`${session.id}-${verse.id}-${vIdx}`}>
+            {verse.bookHeader && showBookHeader && (
+              <div className="w-full text-center py-4 opacity-50">
+                <h2 className="text-2xl font-bold uppercase tracking-widest">{verse.bookHeader}</h2>
+              </div>
+            )}
+            {(verse.isNewPassage || verse.isNewChapter) && <div className="h-2.5 w-full" />}
+            {stanzaBreak && <div className="h-3 w-full" />}
+            {blockMode ? (
+              <div
+                data-verse-index={vIdx}
+                className="mb-2"
+                style={indentLevel > 0 ? { paddingInlineStart: `${indentLevel * 2.2}em` } : undefined}
+              >
+                {verse.acrostic && (
+                  <div className="text-[0.7em] tracking-[0.25em] uppercase italic opacity-60 mb-1">
+                    {verse.acrostic}
+                  </div>
+                )}
+                <div className="flex gap-2.5 items-baseline">
+                  {showVerseNumbers && (
+                    <span
+                      className="font-bold text-[0.72em] shrink-0"
+                      style={{ color: verseNumberColor }}
+                    >
+                      {verseNumber}
+                    </span>
+                  )}
+                  <MemoVerseHtml
+                    dir="auto"
+                    html={(verse.html || verse.text).replace(/\u200E/g, '')}
+                  />
+                </div>
+              </div>
+            ) : (
+              <span data-verse-index={vIdx} className="inline">
+                {showVerseNumbers && (
+                  <span
+                    className="font-bold text-[0.72em] align-super mr-1"
+                    style={{ color: verseNumberColor }}
+                  >
+                    {verseNumber}
+                  </span>
+                )}
+                <MemoVerseHtml
+                  dir="auto"
+                  html={(verse.html || verse.text).replace(/\u200E/g, '')}
+                />{' '}
+              </span>
+            )}
+          </React.Fragment>
+        );
+      })}
+    </div>
+  );
+};
 
 export default function App() {
   const [appMode, setAppMode] = useState<'select' | 'control' | 'present'>(() => {
@@ -1937,6 +2068,9 @@ export default function App() {
 
     const sectionsHtml = snapshot.sessions.map((session, sIdx) => {
       const isRtl = session.translation === 'wlc';
+      const links = session.poeticLinks || [];
+      const gutterPx = links.length > 0 ? Math.min(168, 88 + Math.max(0, links.length - 1) * 18) : 0;
+      const contentPadStyle = gutterPx > 0 ? (isRtl ? ` style="padding-right:${gutterPx}px;"` : ` style="padding-left:${gutterPx}px;"`) : '';
       const versesHtml = session.verses.map((v, vIdx) => {
         const vNum = getExportPassageNumber(v, vIdx);
         const vLayout = session.verseLayout?.[v.id];
@@ -1965,7 +2099,7 @@ export default function App() {
             <div class="passage-title">${escapeHtmlAttr(session.name)}</div>
             <div class="passage-meta">${escapeHtmlAttr(session.translation.toUpperCase())} • ${session.verses.length} verse${session.verses.length === 1 ? '' : 's'}</div>
           </header>
-          <div class="passage-content">${versesHtml}</div>
+          <div class="passage-content" data-links="${escapeHtmlAttr(JSON.stringify(links))}" data-rtl="${isRtl ? '1' : '0'}"${contentPadStyle}>${versesHtml}</div>
         </section>`;
     }).join('\n');
 
@@ -2037,7 +2171,7 @@ export default function App() {
     }
     .passage-title { font-size: 20px; font-weight: 800; }
     .passage-meta { font-size: 11px; text-transform: uppercase; letter-spacing: 0.12em; color: ${mutedColor}; font-weight: 700; }
-    .passage-content { font-size: ${baseFontSize}px; line-height: ${Math.max(settings.textSpacing, 2.1)}; }
+    .passage-content { position: relative; font-size: ${baseFontSize}px; line-height: ${Math.max(settings.textSpacing, 2.2)}; }
     .book-header { font-size: 24px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.18em; opacity: 0.45; margin: 18px 0 10px; text-align: center; }
     .chapter-break { height: 14px; }
     .stanza-break { height: 16px; }
@@ -2054,6 +2188,7 @@ export default function App() {
     .verse-poetic-label::before { content: attr(data-glide-label); position: absolute; bottom: calc(100% + 2px); left: 0; white-space: nowrap; font-size: 9px; line-height: 1.25; font-weight: 800; font-family: var(--font-sans); text-transform: uppercase; letter-spacing: 0.06em; padding: 1px 6px; border-radius: 999px; background-color: var(--glide-label-color, #10b981); color: #ffffff; }
     .verse-poetic-anchor { background-color: color-mix(in srgb, var(--glide-anchor-color, #10b981) 14%, transparent); border-bottom: 2px solid var(--glide-anchor-color, #10b981); border-radius: 3px; padding: 1px 3px; box-decoration-break: clone; -webkit-box-decoration-break: clone; }
     .hide-poetic-labels .verse-poetic-tag::before, .hide-poetic-labels .verse-poetic-label::before { display: none; }
+    .export-rail-svg { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; pointer-events: none; }
     @media print {
       @page { margin: 0.6in; }
       body { padding: 0; }
@@ -2070,6 +2205,91 @@ export default function App() {
   <main class="page-wrap${settings.showPoeticLabels === false ? ' hide-poetic-labels' : ''}">
     ${sectionsHtml}
   </main>
+  <script>
+    (function(){
+      function drawExportRails(){
+        document.querySelectorAll('.passage-content[data-links]').forEach(function(wrap){
+          var oldSvg = wrap.querySelector('.export-rail-svg');
+          if (oldSvg) oldSvg.remove();
+          var links = [];
+          try { links = JSON.parse(wrap.getAttribute('data-links') || '[]'); } catch(e) {}
+          if (!links.length) return;
+          var isRtl = wrap.getAttribute('data-rtl') === '1';
+          var wRect = wrap.getBoundingClientRect();
+          if (!wRect.width) return;
+          var cs = getComputedStyle(wrap);
+          var sidePad = parseFloat(isRtl ? cs.paddingRight : cs.paddingLeft) || 0;
+          var edgeX = sidePad >= 48 ? (isRtl ? wRect.width - sidePad + 8 : sidePad - 8) : (isRtl ? wRect.width - 8 : 8);
+          var items = [];
+          links.forEach(function(lnk){
+            var a = wrap.querySelector('[data-glide-anchor="' + lnk.fromAnchorId + '"]');
+            var b = wrap.querySelector('[data-glide-anchor="' + lnk.toAnchorId + '"]');
+            if (!a || !b) return;
+            var r1 = a.getClientRects()[0] || a.getBoundingClientRect();
+            var r2 = b.getClientRects()[0] || b.getBoundingClientRect();
+            var y1 = r1.top - wRect.top + r1.height / 2;
+            var y2 = r2.top - wRect.top + r2.height / 2;
+            items.push({ lnk: lnk, topY: Math.min(y1, y2), botY: Math.max(y1, y2) });
+          });
+          if (!items.length) return;
+          items.sort(function(a, b){ return (a.botY - a.topY) - (b.botY - b.topY); });
+          var lanes = [];
+          var ns = 'http://www.w3.org/2000/svg';
+          var svg = document.createElementNS(ns, 'svg');
+          svg.setAttribute('class', 'export-rail-svg');
+          items.forEach(function(it){
+            var lane = 0;
+            while (true) {
+              var ex = lanes[lane] || [];
+              var hit = ex.some(function(e){ return !(it.botY + 8 < e.topY || it.topY - 8 > e.botY); });
+              if (!hit) { ex.push({ topY: it.topY, botY: it.botY }); lanes[lane] = ex; break; }
+              lane++;
+            }
+            var off = 28 + lane * 22;
+            var rx = Math.max(28, Math.min(wRect.width - 28, isRtl ? edgeX + off : edgeX - off));
+            var dir = isRtl ? 1 : -1;
+            var spanH = Math.abs(it.botY - it.topY);
+            var effTop = spanH < 10 ? (it.topY + it.botY) / 2 - 7 : it.topY;
+            var effBot = spanH < 10 ? (it.topY + it.botY) / 2 + 7 : it.botY;
+            var r = Math.min(10, Math.abs(effBot - effTop) / 2);
+            var midY = (effTop + effBot) / 2;
+            var d = 'M ' + edgeX + ' ' + it.topY + ' L ' + (rx - dir * r) + ' ' + effTop + ' Q ' + rx + ' ' + effTop + ' ' + rx + ' ' + (effTop + r) + ' L ' + rx + ' ' + (effBot - r) + ' Q ' + rx + ' ' + effBot + ' ' + (rx - dir * r) + ' ' + effBot + ' L ' + edgeX + ' ' + it.botY;
+            var path = document.createElementNS(ns, 'path');
+            path.setAttribute('d', d);
+            path.setAttribute('fill', 'none');
+            path.setAttribute('stroke', it.lnk.color);
+            path.setAttribute('stroke-width', '2.5');
+            path.setAttribute('stroke-linecap', 'round');
+            if (it.lnk.type === 'parallel') path.setAttribute('stroke-dasharray', '6 4');
+            svg.appendChild(path);
+            [it.topY, it.botY].forEach(function(cy){
+              var c = document.createElementNS(ns, 'circle');
+              c.setAttribute('cx', String(edgeX)); c.setAttribute('cy', String(cy)); c.setAttribute('r', '3.5');
+              c.setAttribute('fill', it.lnk.color);
+              svg.appendChild(c);
+            });
+            var g = document.createElementNS(ns, 'g');
+            g.setAttribute('transform', 'translate(' + rx + ',' + midY + ')');
+            var rect = document.createElementNS(ns, 'rect');
+            rect.setAttribute('x', '-27'); rect.setAttribute('y', '-9.5'); rect.setAttribute('width', '54'); rect.setAttribute('height', '19'); rect.setAttribute('rx', '9.5');
+            rect.setAttribute('fill', it.lnk.color);
+            var txt = document.createElementNS(ns, 'text');
+            txt.setAttribute('x', '0'); txt.setAttribute('y', '3.5'); txt.setAttribute('text-anchor', 'middle');
+            txt.setAttribute('fill', '#ffffff'); txt.setAttribute('font-size', '8.5'); txt.setAttribute('font-weight', '800');
+            txt.setAttribute('font-family', 'Inter, sans-serif');
+            txt.style.textTransform = 'uppercase'; txt.style.letterSpacing = '0.06em';
+            txt.textContent = (it.lnk.label || '').slice(0, 8);
+            g.appendChild(rect); g.appendChild(txt); svg.appendChild(g);
+          });
+          wrap.insertBefore(svg, wrap.firstChild);
+        });
+      }
+      window.addEventListener('load', drawExportRails);
+      window.addEventListener('resize', drawExportRails);
+      window.addEventListener('beforeprint', drawExportRails);
+      setTimeout(drawExportRails, 60);
+    })();
+  </script>
 </body>
 </html>`;
   };
@@ -2095,7 +2315,7 @@ export default function App() {
           document.title = prevTitle;
           window.removeEventListener('afterprint', restoreTitle);
         }, 1500);
-      }, 80);
+      }, 180);
     });
   };
 
@@ -3037,6 +3257,9 @@ export default function App() {
     const selection = window.getSelection();
     if (!selection) return;
 
+    const isEraser = tool.type === 'eraser';
+    if (selection.isCollapsed && !isEraser) return;
+
     const shouldSnapWholeWords = toolbarMode === 'poetic' || tool.type.startsWith('poetic');
     if (selection.isCollapsed || shouldSnapWholeWords) {
       expandSelectionToWords(selection, shouldSnapWholeWords);
@@ -3045,7 +3268,6 @@ export default function App() {
     const freshSelection = window.getSelection();
     if (!freshSelection || freshSelection.rangeCount === 0) return;
 
-    const isEraser = tool.type === 'eraser';
     const hasSelection = freshSelection.toString().replace(/\u200E/g, '').trim().length > 0;
     if (!isEraser && !hasSelection) return;
 
@@ -3305,7 +3527,7 @@ export default function App() {
 
   const fetchWithTimeout = useCallback(async (url: string, options: RequestInit = {}, timeout = 6000) => {
     const controller = new AbortController();
-    const id = setTimeout(() => controller.abort(), timeout);
+    const id = setTimeout(() => controller.abort(new Error('Request timed out')), timeout);
     try {
       const response = await fetch(url, { ...options, signal: controller.signal });
       clearTimeout(id);
@@ -3489,12 +3711,19 @@ export default function App() {
           }
         } else {
           try {
-            const res = await fetchWithTimeout(`https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(targetUrl)}`);
-            if (res.ok) textData = await res.text(); else throw new Error();
-          } catch (err1) {
-            const res = await fetchWithTimeout(`https://api.allorigins.win/get?url=${encodeURIComponent(targetUrl)}`);
-            if (res.ok) { const proxyData = await res.json(); textData = proxyData.contents; }
-            else throw new Error("Network/Proxy connection failed.");
+            // labs.bible.org sends Access-Control-Allow-Origin: *; prefer direct fetch before public CORS proxies
+            const directRes = await fetchWithTimeout(targetUrl);
+            if (directRes.ok) textData = await directRes.text();
+            else throw new Error(`HTTP ${directRes.status}`);
+          } catch (directErr) {
+            try {
+              const res = await fetchWithTimeout(`https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(targetUrl)}`);
+              if (res.ok) textData = await res.text(); else throw new Error();
+            } catch (err1) {
+              const res = await fetchWithTimeout(`https://api.allorigins.win/get?url=${encodeURIComponent(targetUrl)}`);
+              if (res.ok) { const proxyData = await res.json(); textData = proxyData.contents; }
+              else throw new Error("Network/Proxy connection failed.");
+            }
           }
         }
         const jsonData = JSON.parse(textData!);
@@ -5752,7 +5981,7 @@ export default function App() {
     {exportPrintSnapshot && (
       <div
         id="scriptureglide-print-sheet"
-        className={`hidden print:block w-full min-h-screen p-4 ${settings.showPoeticLabels === false ? 'hide-poetic-labels' : ''}`}
+        className={`glide-print-sheet fixed -left-[99999px] top-0 w-[7.2in] invisible pointer-events-none print:static print:left-auto print:mx-auto print:visible print:pointer-events-auto block p-4 ${settings.showPoeticLabels === false ? 'hide-poetic-labels' : ''}`}
         style={{
           backgroundColor: exportPrintSnapshot.paperStyle === 'white' ? '#ffffff' : settings.pageColor,
           color: exportPrintSnapshot.paperStyle === 'white' ? '#0f172a' : (settings.theme === 'dark' ? '#f8fafc' : '#0f172a'),
@@ -5761,7 +5990,7 @@ export default function App() {
       >
         {exportPrintSnapshot.sessions.map((session, sIdx) => {
           const isRtl = session.translation === 'wlc';
-          const baseFontSize = Math.min(Math.max(Math.round(settings.textSize * 0.5), 14), 22);
+          const baseFontSize = Math.min(Math.max(Math.round(settings.textSize * 0.42), 13), 18);
           return (
             <section
               key={session.id}
@@ -5782,69 +6011,17 @@ export default function App() {
                   {session.translation.toUpperCase()} • {session.verses.length} verse{session.verses.length === 1 ? '' : 's'}
                 </span>
               </header>
-              <div
-                style={{
-                  fontSize: `${baseFontSize}px`,
-                  lineHeight: Math.max(settings.textSpacing, 1.65)
-                }}
-              >
-                {session.verses.map((verse, vIdx) => {
-                  const verseNumber = getExportPassageNumber(verse, vIdx);
-                  const vLayout = session.verseLayout?.[verse.id];
-                  const indentLevel = vLayout?.indent || 0;
-                  const stanzaBreak = !!vLayout?.stanzaBreakBefore;
-                  const blockMode = exportPrintSnapshot.oneVersePerLine || verse.isNewChapter || verse.acrostic || indentLevel > 0 || stanzaBreak;
-                  return (
-                    <React.Fragment key={`${session.id}-${verse.id}-${vIdx}`}>
-                      {verse.bookHeader && settings.showBookHeader !== false && (
-                        <div className="w-full text-center py-4 opacity-50">
-                          <h2 className="text-2xl font-bold uppercase tracking-widest">{verse.bookHeader}</h2>
-                        </div>
-                      )}
-                      {(verse.isNewPassage || verse.isNewChapter) && <div className="h-3 w-full" />}
-                      {stanzaBreak && <div className="h-4 w-full" />}
-                      {blockMode ? (
-                        <div className="mb-3" style={indentLevel > 0 ? { paddingInlineStart: `${indentLevel * 2.2}em` } : undefined}>
-                          {verse.acrostic && (
-                            <div className="text-[0.7em] tracking-[0.25em] uppercase italic opacity-60 mb-1">
-                              {verse.acrostic}
-                            </div>
-                          )}
-                          <div className="flex gap-2.5 items-baseline">
-                            {exportPrintSnapshot.showVerseNumbers && (
-                              <span
-                                className="font-bold text-[0.72em] shrink-0"
-                                style={{ color: settings.verseNumberColor || '#d97706' }}
-                              >
-                                {verseNumber}
-                              </span>
-                            )}
-                            <span
-                              dir="auto"
-                              dangerouslySetInnerHTML={{ __html: (verse.html || verse.text).replace(/\u200E/g, '') }}
-                            />
-                          </div>
-                        </div>
-                      ) : (
-                        <span className="inline">
-                          {exportPrintSnapshot.showVerseNumbers && (
-                            <span
-                              className="font-bold text-[0.72em] align-super mr-1"
-                              style={{ color: settings.verseNumberColor || '#d97706' }}
-                            >
-                              {verseNumber}
-                            </span>
-                          )}
-                          <span
-                            dir="auto"
-                            dangerouslySetInnerHTML={{ __html: (verse.html || verse.text).replace(/\u200E/g, '') }}
-                          />{' '}
-                        </span>
-                      )}
-                    </React.Fragment>
-                  );
-                })}
-              </div>
+              <PrintSessionBody
+                session={session}
+                baseFontSize={baseFontSize}
+                textSpacing={settings.textSpacing}
+                showBookHeader={settings.showBookHeader !== false}
+                showVerseNumbers={exportPrintSnapshot.showVerseNumbers}
+                oneVersePerLine={exportPrintSnapshot.oneVersePerLine}
+                verseNumberColor={settings.verseNumberColor || '#d97706'}
+                showPoeticLabels={settings.showPoeticLabels !== false}
+                getPassageNumber={getExportPassageNumber}
+              />
             </section>
           );
         })}
