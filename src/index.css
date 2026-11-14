@@ -92,6 +92,8 @@
   .glide-print-sheet [data-verse-index] {
     break-inside: avoid;
     page-break-inside: avoid;
+    padding-top: 18px;
+    margin-bottom: 0;
   }
   * {
     -webkit-print-color-adjust: exact !important;

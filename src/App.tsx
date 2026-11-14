@@ -513,9 +513,9 @@ const PoeticGutterOverlay: React.FC<{
           laneIdx++;
         }
 
-        const offset = 28 + laneIdx * 22;
+        const offset = 28 + laneIdx * 34;
         const rawRailX = isRtl ? textEdgeX + offset : textEdgeX - offset;
-        const railX = Math.max(28, Math.min(wRect.width - 28, rawRailX));
+        const railX = Math.max(24, Math.min(wRect.width - 24, rawRailX));
         computedArcs.push({
           link: item.link,
           topY: item.topY,
@@ -708,6 +708,8 @@ const PoeticGutterOverlay: React.FC<{
             const opacity = active ? 0.94 : 0.45;
             const labelX = railX;
             const textColor = getContrastTextColor(link.color);
+            const displayLabel = (link.label || '').slice(0, 8);
+            const badgeW = Math.max(40, Math.round(displayLabel.length * 6.2 + 12));
 
             return (
               <g key={link.id} style={{ opacity, transition: 'opacity 300ms ease' }}>
@@ -733,9 +735,9 @@ const PoeticGutterOverlay: React.FC<{
                 >
                   {isControl && <title>{`${link.label} — Click to remove rail`}</title>}
                   <rect
-                    x={-27}
+                    x={-badgeW / 2}
                     y={-9.5}
-                    width={54}
+                    width={badgeW}
                     height={19}
                     rx={9.5}
                     fill={link.color}
@@ -750,7 +752,7 @@ const PoeticGutterOverlay: React.FC<{
                     fontFamily="Inter, sans-serif"
                     style={{ textTransform: 'uppercase', letterSpacing: '0.06em' }}
                   >
-                    {link.label.slice(0, 8)}
+                    {displayLabel}
                   </text>
                 </g>
               </g>
@@ -836,7 +838,7 @@ const PrintSessionBody: React.FC<{
     const html = v.html || '';
     return html.includes('data-glide-label') || html.includes('data-glide-tag') || html.includes('data-glide-anchor');
   });
-  const printGutterPx = links.length > 0 ? Math.min(168, 88 + Math.max(0, links.length - 1) * 18) : 0;
+  const printGutterPx = links.length > 0 ? Math.min(224, 88 + Math.max(0, links.length - 1) * 34) : 0;
   const lineHeight = hasAnnotations && showPoeticLabels ? Math.max(textSpacing, 2.15) : Math.max(textSpacing, 1.55);
 
   return (
@@ -2069,7 +2071,7 @@ export default function App() {
     const sectionsHtml = snapshot.sessions.map((session, sIdx) => {
       const isRtl = session.translation === 'wlc';
       const links = session.poeticLinks || [];
-      const gutterPx = links.length > 0 ? Math.min(168, 88 + Math.max(0, links.length - 1) * 18) : 0;
+      const gutterPx = links.length > 0 ? Math.min(224, 88 + Math.max(0, links.length - 1) * 34) : 0;
       const contentPadStyle = gutterPx > 0 ? (isRtl ? ` style="padding-right:${gutterPx}px;"` : ` style="padding-left:${gutterPx}px;"`) : '';
       const versesHtml = session.verses.map((v, vIdx) => {
         const vNum = getExportPassageNumber(v, vIdx);
@@ -2171,12 +2173,12 @@ export default function App() {
     }
     .passage-title { font-size: 20px; font-weight: 800; }
     .passage-meta { font-size: 11px; text-transform: uppercase; letter-spacing: 0.12em; color: ${mutedColor}; font-weight: 700; }
-    .passage-content { position: relative; font-size: ${baseFontSize}px; line-height: ${Math.max(settings.textSpacing, 2.2)}; }
+    .passage-content { position: relative; padding-top: 18px; font-size: ${baseFontSize}px; line-height: ${Math.max(settings.textSpacing, 2.2)}; }
     .book-header { font-size: 24px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.18em; opacity: 0.45; margin: 18px 0 10px; text-align: center; }
     .chapter-break { height: 14px; }
     .stanza-break { height: 16px; }
     .acrostic { font-size: 0.7em; text-transform: uppercase; letter-spacing: 0.25em; opacity: 0.55; margin-bottom: 4px; font-style: italic; }
-    .verse-block { margin-bottom: 12px; }
+    .verse-block { margin-bottom: 0; padding-top: 18px; break-inside: avoid; page-break-inside: avoid; }
     .verse-row { display: flex; gap: 10px; align-items: baseline; }
     .verse-inline { display: inline; }
     .verse-num { font-size: 0.72em; font-weight: 700; margin-inline-end: 5px; vertical-align: super; opacity: 0.85; }
@@ -2184,8 +2186,9 @@ export default function App() {
     .verse-poetic-tag, .verse-poetic-label { position: relative; display: inline; padding: 1px 4px; border-radius: 4px; box-decoration-break: clone; -webkit-box-decoration-break: clone; }
     .verse-poetic-tag { background-color: color-mix(in srgb, var(--glide-tag-color, #0d9488) 24%, transparent); border-bottom: 2px solid var(--glide-tag-color, #0d9488); }
     .verse-poetic-label { background-color: color-mix(in srgb, var(--glide-label-color, #10b981) 24%, transparent); border-bottom: 2px solid var(--glide-label-color, #10b981); }
-    .verse-poetic-tag::before { content: attr(data-glide-tag); position: absolute; bottom: calc(100% + 2px); left: 0; white-space: nowrap; font-size: 9px; line-height: 1.25; font-weight: 800; font-family: var(--font-sans); letter-spacing: 0.05em; padding: 1px 6px; border-radius: 999px; background-color: var(--glide-tag-color, #0d9488); color: #ffffff; }
-    .verse-poetic-label::before { content: attr(data-glide-label); position: absolute; bottom: calc(100% + 2px); left: 0; white-space: nowrap; font-size: 9px; line-height: 1.25; font-weight: 800; font-family: var(--font-sans); text-transform: uppercase; letter-spacing: 0.06em; padding: 1px 6px; border-radius: 999px; background-color: var(--glide-label-color, #10b981); color: #ffffff; }
+    .verse-poetic-tag::before { content: attr(data-glide-tag); position: absolute; bottom: calc(100% + 2px + var(--pill-y, 0px)); left: 0; white-space: nowrap; font-size: 9px; line-height: 1.25; font-weight: 800; font-family: var(--font-sans); letter-spacing: 0.05em; padding: 1px 6px; border-radius: 999px; background-color: var(--glide-tag-color, #0d9488); color: #ffffff; }
+    .verse-poetic-label::before { content: attr(data-glide-label); position: absolute; bottom: calc(100% + 2px + var(--pill-y, 0px)); left: 0; white-space: nowrap; font-size: 9px; line-height: 1.25; font-weight: 800; font-family: var(--font-sans); text-transform: uppercase; letter-spacing: 0.06em; padding: 1px 6px; border-radius: 999px; background-color: var(--glide-label-color, #10b981); color: #ffffff; }
+    .pill-align-right::before { left: auto; right: 0; }
     .verse-poetic-anchor { background-color: color-mix(in srgb, var(--glide-anchor-color, #10b981) 14%, transparent); border-bottom: 2px solid var(--glide-anchor-color, #10b981); border-radius: 3px; padding: 1px 3px; box-decoration-break: clone; -webkit-box-decoration-break: clone; }
     .hide-poetic-labels .verse-poetic-tag::before, .hide-poetic-labels .verse-poetic-label::before { display: none; }
     .export-rail-svg { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; pointer-events: none; }
@@ -2207,7 +2210,54 @@ export default function App() {
   </main>
   <script>
     (function(){
+      function contrastText(hex){
+        var c = (hex || '').replace('#', '');
+        if (c.length === 3) c = c[0]+c[0]+c[1]+c[1]+c[2]+c[2];
+        if (c.length !== 6) return '#ffffff';
+        var r = parseInt(c.slice(0,2),16), g = parseInt(c.slice(2,4),16), b = parseInt(c.slice(4,6),16);
+        var lum = (0.299*r + 0.587*g + 0.114*b) / 255;
+        return lum > 0.68 ? '#0f172a' : '#ffffff';
+      }
+      function layoutExportPills(){
+        document.querySelectorAll('.passage-content').forEach(function(wrap){
+          var wRect = wrap.getBoundingClientRect();
+          if (!wRect.width) return;
+          var els = Array.from(wrap.querySelectorAll('[data-glide-label], [data-glide-tag]'));
+          els.forEach(function(el){
+            el.classList.remove('pill-align-right');
+            el.style.removeProperty('--pill-y');
+          });
+          var placed = [];
+          els.forEach(function(el){
+            var isTag = el.hasAttribute('data-glide-tag');
+            var txt = ((isTag ? el.getAttribute('data-glide-tag') : el.getAttribute('data-glide-label')) || '').trim();
+            if (!txt) return;
+            var rects = Array.from(el.getClientRects()).filter(function(r){ return r.width > 0.5 && r.height > 0.5; });
+            if (!rects.length) return;
+            var r0 = rects[0];
+            var estW = isTag ? Math.max(20, txt.length * 7 + 12) : Math.max(30, txt.length * 6.3 + 14);
+            var left = r0.left - wRect.left;
+            var right = left + estW;
+            if (right > wRect.width - 4) {
+              el.classList.add('pill-align-right');
+              right = r0.right - wRect.left;
+              left = right - estW;
+            }
+            var lift = 0;
+            var curTop = r0.top - wRect.top - 14;
+            for (var step = 0; step < 3; step++) {
+              var hit = placed.some(function(p){ return Math.abs(p.top - curTop) < 12 && !(right + 3 < p.left || left - 3 > p.right); });
+              if (!hit) break;
+              lift += 14;
+              curTop -= 14;
+            }
+            if (lift > 0) el.style.setProperty('--pill-y', lift + 'px');
+            placed.push({ left: left, right: right, top: curTop });
+          });
+        });
+      }
       function drawExportRails(){
+        layoutExportPills();
         document.querySelectorAll('.passage-content[data-links]').forEach(function(wrap){
           var oldSvg = wrap.querySelector('.export-rail-svg');
           if (oldSvg) oldSvg.remove();
@@ -2245,8 +2295,8 @@ export default function App() {
               if (!hit) { ex.push({ topY: it.topY, botY: it.botY }); lanes[lane] = ex; break; }
               lane++;
             }
-            var off = 28 + lane * 22;
-            var rx = Math.max(28, Math.min(wRect.width - 28, isRtl ? edgeX + off : edgeX - off));
+            var off = 28 + lane * 34;
+            var rx = Math.max(24, Math.min(wRect.width - 24, isRtl ? edgeX + off : edgeX - off));
             var dir = isRtl ? 1 : -1;
             var spanH = Math.abs(it.botY - it.topY);
             var effTop = spanH < 10 ? (it.topY + it.botY) / 2 - 7 : it.topY;
@@ -2268,17 +2318,19 @@ export default function App() {
               c.setAttribute('fill', it.lnk.color);
               svg.appendChild(c);
             });
+            var lblText = (it.lnk.label || '').slice(0, 8);
+            var badgeW = Math.max(40, Math.round(lblText.length * 6.2 + 12));
             var g = document.createElementNS(ns, 'g');
             g.setAttribute('transform', 'translate(' + rx + ',' + midY + ')');
             var rect = document.createElementNS(ns, 'rect');
-            rect.setAttribute('x', '-27'); rect.setAttribute('y', '-9.5'); rect.setAttribute('width', '54'); rect.setAttribute('height', '19'); rect.setAttribute('rx', '9.5');
+            rect.setAttribute('x', String(-badgeW / 2)); rect.setAttribute('y', '-9.5'); rect.setAttribute('width', String(badgeW)); rect.setAttribute('height', '19'); rect.setAttribute('rx', '9.5');
             rect.setAttribute('fill', it.lnk.color);
             var txt = document.createElementNS(ns, 'text');
             txt.setAttribute('x', '0'); txt.setAttribute('y', '3.5'); txt.setAttribute('text-anchor', 'middle');
-            txt.setAttribute('fill', '#ffffff'); txt.setAttribute('font-size', '8.5'); txt.setAttribute('font-weight', '800');
+            txt.setAttribute('fill', contrastText(it.lnk.color)); txt.setAttribute('font-size', '8.5'); txt.setAttribute('font-weight', '800');
             txt.setAttribute('font-family', 'Inter, sans-serif');
             txt.style.textTransform = 'uppercase'; txt.style.letterSpacing = '0.06em';
-            txt.textContent = (it.lnk.label || '').slice(0, 8);
+            txt.textContent = lblText;
             g.appendChild(rect); g.appendChild(txt); svg.appendChild(g);
           });
           wrap.insertBefore(svg, wrap.firstChild);
@@ -2287,6 +2339,7 @@ export default function App() {
       window.addEventListener('load', drawExportRails);
       window.addEventListener('resize', drawExportRails);
       window.addEventListener('beforeprint', drawExportRails);
+      if (document.fonts && document.fonts.ready) document.fonts.ready.then(drawExportRails);
       setTimeout(drawExportRails, 60);
     })();
   </script>
@@ -2568,7 +2621,7 @@ export default function App() {
   }, [poeticLinks.length, pendingPoeticAnchor, verses]);
 
   const showRailGutter = poeticLinks.length > 0 || !!pendingPoeticAnchor || (appMode === 'control' && toolbarMode === 'poetic' && activeTool?.type === 'poeticLink');
-  const railGutterPx = showRailGutter ? Math.min(168, 88 + Math.max(0, poeticLinks.length - 1) * 18) : 0;
+  const railGutterPx = showRailGutter ? Math.min(224, 88 + Math.max(0, poeticLinks.length - 1) * 34) : 0;
   const effectiveLineHeight = (settings.showPoeticLabels !== false && (hasPoeticAnnotations || (appMode === 'control' && toolbarMode === 'poetic')))
     ? Math.max(settings.textSpacing, settings.textSize < 26 ? 2.35 : 2.18)
     : settings.textSpacing;
