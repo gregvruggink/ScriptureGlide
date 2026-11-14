@@ -2086,7 +2086,13 @@ export default function App() {
     // We want the text centered in the REMAINING visual space to the eye
     let chromeHeight = 0;
     if (appMode === 'control') {
-      chromeHeight = 140;
+      if (readingMode) {
+        chromeHeight = settings.showReferenceBox ? 140 : 40;
+      } else if (toolbarMode === 'poetic') {
+        chromeHeight = settings.showReferenceBox ? 220 : 170;
+      } else {
+        chromeHeight = settings.showReferenceBox ? 160 : 110;
+      }
     } else if (appMode === 'present') {
       chromeHeight = settings.showReferenceBox ? 140 : 40;
     }
@@ -2115,7 +2121,7 @@ export default function App() {
     };
 
     requestAnimationFrame(animateScroll);
-  }, [activeVerseIndex, settings.scrollSpeed, settings.textSize, settings.textSpacing, settings.verseCount, settings.maxWidth, settings.oneVersePerLine, settings.showVerseNumbers, verses, appMode]);
+  }, [activeVerseIndex, settings.scrollSpeed, settings.textSize, settings.textSpacing, settings.verseCount, settings.maxWidth, settings.oneVersePerLine, settings.showVerseNumbers, settings.showReferenceBox, toolbarMode, readingMode, verses, appMode]);
 
   const applyFormat = useCallback((command: string, value: string | null = null, skipSync = false) => {
     document.execCommand(command, false, value ?? undefined);
@@ -3175,6 +3181,20 @@ export default function App() {
 
   const activeFont = React.useMemo(() => FONT_OPTIONS.find(f => f.id === settings.fontFamily) || FONT_OPTIONS[0], [settings.fontFamily]);
 
+  const renderReferenceBoxBadge = () => (
+    <div
+      className="px-8 py-3 rounded-lg shadow-2xl tracking-widest whitespace-nowrap uppercase font-display font-bold ring-1 ring-amber-500/30"
+      style={{
+        fontSize: `${Math.max(settings.textSize * 0.45, 14)}px`,
+        backgroundColor: settings.referenceBoxColor || (settings.theme === 'dark' ? 'rgba(248, 250, 252, 0.95)' : 'rgba(15, 23, 42, 0.95)'),
+        color: (settings.referenceBoxColor && !settings.referenceBoxColor.startsWith('rgba(15')) ? (parseInt(settings.referenceBoxColor.replace('#',''), 16) > 0xffffff/2 ? '#0f172a' : '#f8fafc') : (settings.theme === 'dark' ? '#0f172a' : '#f8fafc'),
+        backdropFilter: 'blur(12px)'
+      }}
+    >
+      {getActiveReference()}
+    </div>
+  );
+
   if (appMode === 'select') {
     return (
       <div
@@ -3392,17 +3412,7 @@ export default function App() {
               exit={{ opacity: 0, y: 20 }}
               className="fixed bottom-12 left-1/2 -translate-x-1/2 z-[100] pointer-events-none"
             >
-              <div 
-                className="px-8 py-3 rounded-lg shadow-2xl tracking-widest whitespace-nowrap uppercase font-display font-bold ring-1 ring-amber-500/30" 
-                style={{ 
-                  fontSize: `${Math.max(settings.textSize * 0.45, 14)}px`,
-                  backgroundColor: settings.referenceBoxColor || (settings.theme === 'dark' ? 'rgba(248, 250, 252, 0.95)' : 'rgba(15, 23, 42, 0.95)'),
-                  color: (settings.referenceBoxColor && !settings.referenceBoxColor.startsWith('rgba(15')) ? (parseInt(settings.referenceBoxColor.replace('#',''), 16) > 0xffffff/2 ? '#0f172a' : '#f8fafc') : (settings.theme === 'dark' ? '#0f172a' : '#f8fafc'),
-                  backdropFilter: 'blur(12px)'
-                }}
-              >
-                {getActiveReference()}
-              </div>
+              {renderReferenceBoxBadge()}
             </motion.div>
           )}
         </AnimatePresence>
@@ -4522,24 +4532,15 @@ export default function App() {
     </div>
 
         <AnimatePresence>
-          {verses.length > 0 && settings.showReferenceBox && (
+          {readingMode && verses.length > 0 && settings.showReferenceBox && (
             <motion.div 
+              key="reading-reference-box"
               initial={{ opacity: 0, y: 20 }}
               animate={{ opacity: 1, y: 0 }}
               exit={{ opacity: 0, y: 20 }}
-              className="fixed bottom-24 left-1/2 -translate-x-1/2 z-[100] pointer-events-none"
+              className="fixed bottom-12 left-1/2 -translate-x-1/2 z-[100] pointer-events-none"
             >
-              <div 
-                className="px-8 py-3 rounded-lg shadow-2xl tracking-widest whitespace-nowrap uppercase font-display font-bold ring-1 ring-amber-500/30" 
-                style={{ 
-                  fontSize: `${Math.max(settings.textSize * 0.45, 14)}px`,
-                  backgroundColor: settings.referenceBoxColor || (settings.theme === 'dark' ? 'rgba(248, 250, 252, 0.95)' : 'rgba(15, 23, 42, 0.95)'),
-                  color: (settings.referenceBoxColor && !settings.referenceBoxColor.startsWith('rgba(15')) ? (parseInt(settings.referenceBoxColor.replace('#',''), 16) > 0xffffff/2 ? '#0f172a' : '#f8fafc') : (settings.theme === 'dark' ? '#0f172a' : '#f8fafc'),
-                  backdropFilter: 'blur(12px)'
-                }}
-              >
-                {getActiveReference()}
-              </div>
+              {renderReferenceBoxBadge()}
             </motion.div>
           )}
         </AnimatePresence>
@@ -4560,16 +4561,32 @@ export default function App() {
         )}
 
         {appMode === 'control' && !readingMode && (
-          <div key="control-footer" className="fixed bottom-6 left-1/2 -translate-x-1/2 z-[60] flex flex-col items-center gap-2.5 font-sans w-max max-w-[95vw]">
+          <div key="control-footer" className="fixed bottom-6 left-1/2 -translate-x-1/2 z-[60] flex flex-col items-center gap-2.5 font-sans w-max max-w-[95vw] pointer-events-none">
+            <AnimatePresence>
+              {verses.length > 0 && settings.showReferenceBox && (
+                <motion.div
+                  key="control-reference-box"
+                  initial={{ opacity: 0, y: 12 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: 12 }}
+                  className="pointer-events-none mb-0.5"
+                >
+                  {renderReferenceBoxBadge()}
+                </motion.div>
+              )}
+            </AnimatePresence>
+
+            <AnimatePresence>
             {toolbarMode === 'poetic' && (() => {
               const steps = poeticSequenceMode === 'chiasm' ? POETIC_CHIASM_STEPS : POETIC_PARALLEL_STEPS;
               const nextStep = steps[poeticStepIndex % steps.length];
               return (
                 <motion.div
+                  key="poetic-secondary-bar"
                   initial={{ y: 12, opacity: 0 }}
                   animate={{ y: 0, opacity: 1 }}
                   exit={{ y: 12, opacity: 0 }}
-                  className={`flex flex-wrap items-center justify-center gap-2 ${uiBg} ${uiText} px-3 py-1.5 rounded-2xl border ${uiBorder} shadow-xl text-xs`}
+                  className={`pointer-events-auto flex flex-wrap items-center justify-center gap-2 ${uiBg} ${uiText} px-3 py-1.5 rounded-2xl border ${uiBorder} shadow-xl text-xs`}
                 >
                   {/* Structural sequence stepper */}
                   <div className="flex items-center gap-1.5">
@@ -4727,8 +4744,9 @@ export default function App() {
                 </motion.div>
               );
             })()}
+            </AnimatePresence>
 
-            <div className="flex flex-col md:flex-row items-center gap-4">
+            <div className="flex flex-col md:flex-row items-center gap-4 pointer-events-auto">
             <motion.div 
               initial={{ y: 50, opacity: 0 }}
               animate={{ y: 0, opacity: 1 }}
