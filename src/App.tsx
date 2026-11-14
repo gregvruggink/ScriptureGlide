@@ -46,7 +46,7 @@ import {
   GitCompareArrows,
   ListIndentIncrease,
   SeparatorHorizontal,
-  Superscript,
+  Tag,
   Eye,
   EyeOff
 } from 'lucide-react';
@@ -362,6 +362,26 @@ const POETIC_LINK_META: Record<'inclusio' | 'parallel' | 'chiasm', { label: stri
 const POETIC_LABEL_PRESETS = ['inclusio', 'parallel', 'chiasm', 'echo', 'contrast'] as const;
 type PoeticLabelPreset = typeof POETIC_LABEL_PRESETS[number];
 
+const getContrastTextColor = (hex: string): string => {
+  const clean = (hex || '').trim().replace('#', '');
+  if (!/^[0-9a-fA-F]{6}$/.test(clean)) return '#ffffff';
+  const r = parseInt(clean.slice(0, 2), 16);
+  const g = parseInt(clean.slice(2, 4), 16);
+  const b = parseInt(clean.slice(4, 6), 16);
+  const luminance = 0.299 * r + 0.587 * g + 0.114 * b;
+  return luminance > 175 ? '#0f172a' : '#ffffff';
+};
+
+// Keep dangerouslySetInnerHTML object reference stable unless html string itself changes,
+// so React 19 re-renders never reset imperative DOM edits in contentEditable verses.
+const MemoVerseHtml = React.memo(({
+  html,
+  ...spanProps
+}: React.HTMLAttributes<HTMLSpanElement> & { html: string }) => {
+  const htmlObj = useMemo(() => ({ __html: html }), [html]);
+  return <span {...spanProps} dangerouslySetInnerHTML={htmlObj} />;
+});
+
 interface ComputedPoeticArc {
   link: PoeticLink;
   topY: number;
@@ -371,37 +391,90 @@ interface ComputedPoeticArc {
   active: boolean;
 }
 
+interface ComputedPendingStub {
+  y: number;
+  edgeX: number;
+  stubX: number;
+  color: string;
+  label: string;
+}
+
+interface ComputedPoeticPill {
+  key: string;
+  text: string;
+  color: string;
+  textColor: string;
+  x: number;
+  y: number;
+  opacity: number;
+  isTag: boolean;
+  el: HTMLElement;
+}
+
 const PoeticGutterOverlay: React.FC<{
   wrapperRef: React.RefObject<HTMLDivElement | null>;
   poeticLinks: PoeticLink[];
+  pendingPoeticAnchor?: {
+    anchorId: string;
+    verseIndex: number;
+    type: 'inclusio' | 'parallel' | 'chiasm';
+    color: string;
+  } | null;
   activeVerseIndex: number;
   verseCount: number;
   isRtl: boolean;
   isControl: boolean;
+  showLabels?: boolean;
+  isPoeticEditing?: boolean;
   onRemoveLink?: (linkId: string) => void;
+  onRemoveAnnotation?: (el: HTMLElement) => void;
   depsKey: string;
-}> = ({ wrapperRef, poeticLinks, activeVerseIndex, verseCount, isRtl, isControl, onRemoveLink, depsKey }) => {
+}> = ({
+  wrapperRef,
+  poeticLinks,
+  pendingPoeticAnchor = null,
+  activeVerseIndex,
+  verseCount,
+  isRtl,
+  isControl,
+  showLabels = true,
+  isPoeticEditing = false,
+  onRemoveLink,
+  onRemoveAnnotation,
+  depsKey
+}) => {
   const [arcs, setArcs] = useState<ComputedPoeticArc[]>([]);
+  const [pendingStub, setPendingStub] = useState<ComputedPendingStub | null>(null);
+  const [pills, setPills] = useState<ComputedPoeticPill[]>([]);
 
   useLayoutEffect(() => {
     const wrapper = wrapperRef.current;
-    if (!wrapper || !poeticLinks || poeticLinks.length === 0) {
+    if (!wrapper) {
       setArcs([]);
+      setPendingStub(null);
+      setPills([]);
       return;
     }
 
-    const computeArcs = () => {
+    const computeOverlay = () => {
       const wRect = wrapper.getBoundingClientRect();
       if (wRect.width === 0) return;
 
+      const cs = getComputedStyle(wrapper);
+      const sidePad = parseFloat(isRtl ? cs.paddingRight : cs.paddingLeft) || 0;
+      const textEdgeX = sidePad >= 48
+        ? (isRtl ? wRect.width - sidePad + 8 : sidePad - 8)
+        : (isRtl ? wRect.width - 8 : 8);
+
+      // 1. Margin Rail Connectors
       const rawItems: { link: PoeticLink; topY: number; botY: number; active: boolean }[] = [];
-      for (const link of poeticLinks) {
+      for (const link of poeticLinks || []) {
         const fromEl = wrapper.querySelector(`[data-glide-anchor="${link.fromAnchorId}"]`) as HTMLElement | null;
         const toEl = wrapper.querySelector(`[data-glide-anchor="${link.toAnchorId}"]`) as HTMLElement | null;
         if (!fromEl || !toEl) continue;
 
-        const r1 = fromEl.getBoundingClientRect();
-        const r2 = toEl.getBoundingClientRect();
+        const r1 = fromEl.getClientRects()[0] || fromEl.getBoundingClientRect();
+        const r2 = toEl.getClientRects()[0] || toEl.getBoundingClientRect();
         const y1 = r1.top - wRect.top + r1.height / 2;
         const y2 = r2.top - wRect.top + r2.height / 2;
         const topY = Math.min(y1, y2);
@@ -416,12 +489,12 @@ const PoeticGutterOverlay: React.FC<{
           (v1Idx >= activeVerseIndex && v1Idx < endActive) ||
           (v2Idx >= activeVerseIndex && v2Idx < endActive);
 
-        rawItems.push({ link, topY, botY, active: isEndpointActive });
+        rawItems.push({ link, topY, botY, active: isEndpointActive || isPoeticEditing });
       }
 
       rawItems.sort((a, b) => (a.botY - a.topY) - (b.botY - b.topY));
       const lanes: { topY: number; botY: number }[][] = [];
-      const computed: ComputedPoeticArc[] = [];
+      const computedArcs: ComputedPoeticArc[] = [];
 
       for (const item of rawItems) {
         let laneIdx = 0;
@@ -436,106 +509,277 @@ const PoeticGutterOverlay: React.FC<{
           laneIdx++;
         }
 
-        const edgeX = isRtl ? wRect.width - 8 : 8;
-        const offset = 18 + laneIdx * 22;
-        const railX = isRtl ? wRect.width + offset : -offset;
-        computed.push({
+        const offset = 28 + laneIdx * 22;
+        const rawRailX = isRtl ? textEdgeX + offset : textEdgeX - offset;
+        const railX = Math.max(28, Math.min(wRect.width - 28, rawRailX));
+        computedArcs.push({
           link: item.link,
           topY: item.topY,
           botY: item.botY,
-          edgeX,
+          edgeX: textEdgeX,
           railX,
           active: item.active
         });
       }
 
-      setArcs(computed);
+      // 2. Pending Step 1/2 Rail Stub
+      let nextStub: ComputedPendingStub | null = null;
+      if (pendingPoeticAnchor) {
+        const pEl = wrapper.querySelector(`[data-glide-anchor="${pendingPoeticAnchor.anchorId}"]`) as HTMLElement | null;
+        if (pEl) {
+          const r = pEl.getClientRects()[0] || pEl.getBoundingClientRect();
+          const y = r.top - wRect.top + r.height / 2;
+          const rawStubX = isRtl ? textEdgeX + 34 : textEdgeX - 34;
+          const stubX = Math.max(28, Math.min(wRect.width - 28, rawStubX));
+          nextStub = {
+            y,
+            edgeX: textEdgeX,
+            stubX,
+            color: pendingPoeticAnchor.color,
+            label: `${POETIC_LINK_META[pendingPoeticAnchor.type].label.slice(0, 6)} 1/2`
+          };
+        }
+      }
+
+      // 3. Above-Line Floating Label & Tag Pills
+      const nextPills: ComputedPoeticPill[] = [];
+      if (showLabels) {
+        const labelEls = Array.from(wrapper.querySelectorAll('[data-glide-label], [data-glide-tag]')) as HTMLElement[];
+        const placed: { x: number; y: number; halfW: number }[] = [];
+        const rawPills: { el: HTMLElement; text: string; color: string; x: number; y: number; halfW: number; minX: number; maxX: number; opacity: number; isTag: boolean }[] = [];
+
+        for (let i = 0; i < labelEls.length; i++) {
+          const el = labelEls[i];
+          const isTag = el.hasAttribute('data-glide-tag');
+          const text = isTag
+            ? (el.getAttribute('data-glide-tag') || '').trim()
+            : (el.getAttribute('data-glide-label') || '').trim().toUpperCase();
+          if (!text) continue;
+
+          const color = isTag
+            ? (el.style.getPropertyValue('--glide-tag-color').trim() || '#0d9488')
+            : (el.style.getPropertyValue('--glide-label-color').trim() || '#10b981');
+
+          const rawRects = Array.from(el.getClientRects()).filter(r => r.width > 0.5 && r.height > 0.5);
+          if (rawRects.length === 0) continue;
+
+          const firstTop = rawRects[0].top;
+          const lineTol = Math.max(8, rawRects[0].height * 0.45);
+          const firstLineRects = rawRects.filter(r => Math.abs(r.top - firstTop) <= lineTol);
+          const lineLeft = Math.min(...firstLineRects.map(r => r.left));
+          const lineRight = Math.max(...firstLineRects.map(r => r.right));
+          const lineTop = Math.min(...firstLineRects.map(r => r.top));
+
+          const estWidth = isTag ? Math.max(20, text.length * 7 + 14) : Math.max(30, text.length * 6.3 + 16);
+          const halfW = estWidth / 2;
+          const rawX = (lineLeft + lineRight) / 2 - wRect.left;
+          const minX = Math.min(wRect.width / 2, halfW + 4);
+          const maxX = Math.max(wRect.width / 2, wRect.width - halfW - 4);
+          const x = Math.max(minX, Math.min(maxX, rawX));
+          const y = lineTop - wRect.top - 3;
+
+          const vEl = el.closest('[data-verse-index]');
+          const vIdx = vEl ? parseInt(vEl.getAttribute('data-verse-index') || '-1', 10) : -1;
+          const isVActive = vIdx >= activeVerseIndex && vIdx < activeVerseIndex + verseCount;
+          const opacity = isVActive ? 1 : (isPoeticEditing ? 0.78 : 0.22);
+
+          rawPills.push({ el, text, color, x, y, halfW, minX, maxX, opacity, isTag });
+        }
+
+        rawPills.sort((a, b) => (a.y - b.y) || (a.x - b.x));
+
+        rawPills.forEach((p, idx) => {
+          let curX = p.x;
+          let curY = p.y;
+          for (let attempt = 0; attempt < 4; attempt++) {
+            const hit = placed.find(pl => Math.abs(pl.y - curY) < 14 && Math.abs(pl.x - curX) < (pl.halfW + p.halfW + 4));
+            if (!hit) break;
+            const shiftedX = hit.x + hit.halfW + p.halfW + 5;
+            if (shiftedX - p.x <= 20 && shiftedX <= p.maxX && !placed.some(pl => Math.abs(pl.y - curY) < 14 && Math.abs(pl.x - shiftedX) < (pl.halfW + p.halfW + 4))) {
+              curX = shiftedX;
+              break;
+            }
+            curY -= 16;
+          }
+          placed.push({ x: curX, y: curY, halfW: p.halfW });
+          nextPills.push({
+            key: `pill-${idx}-${p.text}-${Math.round(curX)}-${Math.round(curY)}`,
+            text: p.text,
+            color: p.color,
+            textColor: getContrastTextColor(p.color),
+            x: curX,
+            y: curY,
+            opacity: p.opacity,
+            isTag: p.isTag,
+            el: p.el
+          });
+        });
+      }
+
+      setArcs(computedArcs);
+      setPendingStub(nextStub);
+      setPills(nextPills);
     };
 
-    computeArcs();
+    computeOverlay();
 
-    const ro = new ResizeObserver(() => computeArcs());
+    const ro = new ResizeObserver(() => computeOverlay());
     ro.observe(wrapper);
 
-    const mo = new MutationObserver(() => requestAnimationFrame(computeArcs));
-    mo.observe(wrapper, { childList: true, subtree: true, characterData: true });
+    const mo = new MutationObserver((mutations) => {
+      const relevant = mutations.some(m => {
+        const t = m.target as HTMLElement | null;
+        return !t || !(t.closest ? t.closest('[data-glide-overlay="true"]') : t.parentElement?.closest('[data-glide-overlay="true"]'));
+      });
+      if (relevant) requestAnimationFrame(computeOverlay);
+    });
+    mo.observe(wrapper, { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ['data-glide-label', 'data-glide-tag', 'data-glide-anchor', 'style'] });
 
-    window.addEventListener('resize', computeArcs);
-    const raf = requestAnimationFrame(computeArcs);
+    window.addEventListener('resize', computeOverlay);
+    const raf = requestAnimationFrame(computeOverlay);
 
     return () => {
       cancelAnimationFrame(raf);
       ro.disconnect();
       mo.disconnect();
-      window.removeEventListener('resize', computeArcs);
+      window.removeEventListener('resize', computeOverlay);
     };
-  }, [wrapperRef, poeticLinks, activeVerseIndex, verseCount, isRtl, depsKey]);
+  }, [wrapperRef, poeticLinks, pendingPoeticAnchor, activeVerseIndex, verseCount, isRtl, showLabels, isPoeticEditing, depsKey]);
 
-  if (arcs.length === 0) return null;
+  if (arcs.length === 0 && !pendingStub && pills.length === 0) return null;
 
   return (
-    <svg
-      className="absolute inset-0 w-full h-full overflow-visible pointer-events-none z-20 select-none"
-      aria-hidden="true"
-    >
-      {arcs.map(({ link, topY, botY, edgeX, railX, active }) => {
-        const dir = isRtl ? 1 : -1;
-        const r = Math.min(10, Math.abs(botY - topY) / 2);
-        const midY = (topY + botY) / 2;
-        const d =
-          botY - topY < 4
-            ? `M ${edgeX} ${topY} L ${railX} ${topY}`
-            : `M ${edgeX} ${topY} L ${railX - dir * r} ${topY} Q ${railX} ${topY} ${railX} ${topY + r} L ${railX} ${botY - r} Q ${railX} ${botY} ${railX - dir * r} ${botY} L ${edgeX} ${botY}`;
-        const opacity = active ? 0.92 : 0.45;
-        const labelX = railX;
-
-        return (
-          <g key={link.id} style={{ opacity, transition: 'opacity 300ms ease' }}>
-            <path
-              d={d}
-              fill="none"
-              stroke={link.color}
-              strokeWidth={2.5}
-              strokeLinecap="round"
-              strokeDasharray={link.type === 'parallel' ? '6 4' : undefined}
-            />
-            <circle cx={edgeX} cy={topY} r={3.5} fill={link.color} />
-            <circle cx={edgeX} cy={botY} r={3.5} fill={link.color} />
-            <g
-              transform={`translate(${labelX}, ${midY})`}
-              className={isControl && onRemoveLink ? 'pointer-events-auto cursor-pointer' : ''}
-              onClick={(e) => {
-                if (!isControl || !onRemoveLink) return;
-                e.stopPropagation();
-                onRemoveLink(link.id);
-              }}
-            >
-              {isControl && <title>{`${link.label} — Click to remove link`}</title>}
-              <rect
-                x={-26}
-                y={-9}
-                width={52}
-                height={18}
-                rx={9}
-                fill={link.color}
+    <div data-glide-overlay="true" className="absolute inset-0 pointer-events-none z-20 select-none">
+      {(arcs.length > 0 || pendingStub) && (
+        <svg
+          className="absolute inset-0 w-full h-full overflow-visible pointer-events-none"
+          aria-hidden="true"
+        >
+          {pendingStub && (
+            <g>
+              <line
+                x1={pendingStub.edgeX}
+                y1={pendingStub.y}
+                x2={pendingStub.stubX}
+                y2={pendingStub.y}
+                stroke={pendingStub.color}
+                strokeWidth={2}
+                strokeDasharray="4 3"
               />
-              <text
-                x={0}
-                y={3.5}
-                textAnchor="middle"
-                fill="#ffffff"
-                fontSize="9"
-                fontWeight="800"
-                fontFamily="Inter, sans-serif"
-                style={{ textTransform: 'uppercase', letterSpacing: '0.06em' }}
-              >
-                {link.label.slice(0, 8)}
-              </text>
+              <circle cx={pendingStub.edgeX} cy={pendingStub.y} r={4} fill={pendingStub.color} />
+              <g transform={`translate(${pendingStub.stubX}, ${pendingStub.y})`}>
+                <rect x={-26} y={-9} width={52} height={18} rx={9} fill={pendingStub.color} stroke="#ffffff" strokeWidth={1} strokeOpacity={0.35} />
+                <text
+                  x={0}
+                  y={3.5}
+                  textAnchor="middle"
+                  fill={getContrastTextColor(pendingStub.color)}
+                  fontSize="8.5"
+                  fontWeight="800"
+                  fontFamily="Inter, sans-serif"
+                  style={{ textTransform: 'uppercase', letterSpacing: '0.04em' }}
+                >
+                  {pendingStub.label}
+                </text>
+              </g>
             </g>
-          </g>
-        );
-      })}
-    </svg>
+          )}
+          {arcs.map(({ link, topY, botY, edgeX, railX, active }) => {
+            const dir = isRtl ? 1 : -1;
+            const spanH = Math.abs(botY - topY);
+            const effTop = spanH < 10 ? (topY + botY) / 2 - 7 : topY;
+            const effBot = spanH < 10 ? (topY + botY) / 2 + 7 : botY;
+            const r = Math.min(10, Math.abs(effBot - effTop) / 2);
+            const midY = (effTop + effBot) / 2;
+            const d = `M ${edgeX} ${topY} L ${railX - dir * r} ${effTop} Q ${railX} ${effTop} ${railX} ${effTop + r} L ${railX} ${effBot - r} Q ${railX} ${effBot} ${railX - dir * r} ${effBot} L ${edgeX} ${botY}`;
+            const opacity = active ? 0.94 : 0.45;
+            const labelX = railX;
+            const textColor = getContrastTextColor(link.color);
+
+            return (
+              <g key={link.id} style={{ opacity, transition: 'opacity 300ms ease' }}>
+                <path
+                  d={d}
+                  fill="none"
+                  stroke={link.color}
+                  strokeWidth={2.5}
+                  strokeLinecap="round"
+                  strokeDasharray={link.type === 'parallel' ? '6 4' : undefined}
+                />
+                <circle cx={edgeX} cy={topY} r={3.5} fill={link.color} />
+                <circle cx={edgeX} cy={botY} r={3.5} fill={link.color} />
+                <g
+                  transform={`translate(${labelX}, ${midY})`}
+                  className={isControl && onRemoveLink ? 'pointer-events-auto cursor-pointer' : ''}
+                  onMouseDown={(e) => {
+                    if (!isControl || !onRemoveLink) return;
+                    e.preventDefault();
+                    e.stopPropagation();
+                    onRemoveLink(link.id);
+                  }}
+                >
+                  {isControl && <title>{`${link.label} — Click to remove rail`}</title>}
+                  <rect
+                    x={-27}
+                    y={-9.5}
+                    width={54}
+                    height={19}
+                    rx={9.5}
+                    fill={link.color}
+                  />
+                  <text
+                    x={0}
+                    y={3.5}
+                    textAnchor="middle"
+                    fill={textColor}
+                    fontSize="8.5"
+                    fontWeight="800"
+                    fontFamily="Inter, sans-serif"
+                    style={{ textTransform: 'uppercase', letterSpacing: '0.06em' }}
+                  >
+                    {link.label.slice(0, 8)}
+                  </text>
+                </g>
+              </g>
+            );
+          })}
+        </svg>
+      )}
+      {pills.map((pill) => (
+        <div
+          key={pill.key}
+          style={{
+            left: `${pill.x}px`,
+            top: `${pill.y}px`,
+            transform: 'translate(-50%, -100%)',
+            opacity: pill.opacity,
+            backgroundColor: pill.color,
+            color: pill.textColor,
+            fontFamily: 'Inter, system-ui, sans-serif'
+          }}
+          className={`group absolute inline-flex items-center gap-1 whitespace-nowrap px-1.5 py-[1px] rounded-full text-[9.5px] font-extrabold leading-[1.2] tracking-[0.06em] shadow-sm ring-1 ring-white/20 transition-opacity duration-300 ${
+            pill.isTag ? 'min-w-[18px] justify-center' : 'uppercase'
+          } ${isControl && onRemoveAnnotation ? 'pointer-events-auto' : 'pointer-events-none'}`}
+        >
+          <span>{pill.text}</span>
+          {isControl && onRemoveAnnotation && (
+            <button
+              type="button"
+              onMouseDown={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                onRemoveAnnotation(pill.el);
+              }}
+              className="hidden group-hover:inline-flex items-center justify-center rounded-full hover:bg-black/20 p-[1px] transition-colors"
+              title="Remove label"
+              aria-label={`Remove ${pill.text} label`}
+            >
+              <X size={9} strokeWidth={3} />
+            </button>
+          )}
+        </div>
+      ))}
+    </div>
   );
 };
 
@@ -939,7 +1183,9 @@ export default function App() {
     type: 'inclusio' | 'parallel' | 'chiasm';
     color: string;
   } | null>(null);
-  const [poeticLabelPreset, setPoeticLabelPreset] = useState<PoeticLabelPreset>('inclusio');
+  const [poeticLabelPreset, setPoeticLabelPreset] = useState<string>('inclusio');
+  const [customPoeticLabel, setCustomPoeticLabel] = useState('');
+  const [showCustomLabelInput, setShowCustomLabelInput] = useState(false);
   const [resetKey, setResetKey] = useState(0);
   const [isPresenting, setIsPresenting] = useState(false);
   const [availableMonitors, setAvailableMonitors] = useState<any[]>([]);
@@ -948,6 +1194,8 @@ export default function App() {
   const containerRef = useRef<HTMLDivElement>(null);
   const controlWrapperRef = useRef<HTMLDivElement>(null);
   const presentWrapperRef = useRef<HTMLDivElement>(null);
+  const suppressNextVerseClickRef = useRef(false);
+  const mouseDownPointRef = useRef<{ x: number; y: number } | null>(null);
 
   const linkedPartnerVerseIndices = useMemo(() => {
     const partners = new Set<number>();
@@ -1789,7 +2037,7 @@ export default function App() {
     }
     .passage-title { font-size: 20px; font-weight: 800; }
     .passage-meta { font-size: 11px; text-transform: uppercase; letter-spacing: 0.12em; color: ${mutedColor}; font-weight: 700; }
-    .passage-content { font-size: ${baseFontSize}px; line-height: ${Math.max(settings.textSpacing, 1.65)}; }
+    .passage-content { font-size: ${baseFontSize}px; line-height: ${Math.max(settings.textSpacing, 2.1)}; }
     .book-header { font-size: 24px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.18em; opacity: 0.45; margin: 18px 0 10px; text-align: center; }
     .chapter-break { height: 14px; }
     .stanza-break { height: 16px; }
@@ -1799,13 +2047,13 @@ export default function App() {
     .verse-inline { display: inline; }
     .verse-num { font-size: 0.72em; font-weight: 700; margin-inline-end: 5px; vertical-align: super; opacity: 0.85; }
     .verse-markup { box-decoration-break: clone; -webkit-box-decoration-break: clone; }
-    .verse-poetic-tag { position: relative; display: inline; padding: 0 3px; border-radius: 4px; box-decoration-break: clone; -webkit-box-decoration-break: clone; }
-    .verse-poetic-tag::after { content: attr(data-glide-tag); display: inline-block; vertical-align: super; font-size: 0.48em; line-height: 0; font-weight: 800; font-family: var(--font-sans); letter-spacing: 0.04em; padding: 5px 5px; margin-inline-start: 3px; border-radius: 999px; background-color: var(--glide-tag-color, #0d9488); color: #ffffff; }
-    .verse-poetic-anchor { border-bottom: 2px solid var(--glide-anchor-color, #10b981); border-radius: 3px; padding: 0 2px; box-decoration-break: clone; -webkit-box-decoration-break: clone; }
-    .verse-poetic-anchor::after { content: attr(data-glide-anchor-label); display: inline-block; vertical-align: super; font-size: 0.42em; line-height: 0; font-weight: 800; font-family: var(--font-sans); text-transform: uppercase; letter-spacing: 0.06em; margin-inline-start: 4px; color: var(--glide-anchor-color, #10b981); }
-    .verse-poetic-label { display: inline; }
-    .verse-poetic-label::after { content: attr(data-glide-label); display: inline-block; vertical-align: super; font-size: 0.42em; line-height: 0; font-weight: 800; font-family: var(--font-sans); text-transform: uppercase; letter-spacing: 0.06em; margin-inline-start: 3px; color: var(--glide-label-color, #10b981); }
-    .hide-poetic-labels .verse-poetic-anchor::after, .hide-poetic-labels .verse-poetic-label::after { display: none; }
+    .verse-poetic-tag, .verse-poetic-label { position: relative; display: inline; padding: 1px 4px; border-radius: 4px; box-decoration-break: clone; -webkit-box-decoration-break: clone; }
+    .verse-poetic-tag { background-color: color-mix(in srgb, var(--glide-tag-color, #0d9488) 24%, transparent); border-bottom: 2px solid var(--glide-tag-color, #0d9488); }
+    .verse-poetic-label { background-color: color-mix(in srgb, var(--glide-label-color, #10b981) 24%, transparent); border-bottom: 2px solid var(--glide-label-color, #10b981); }
+    .verse-poetic-tag::before { content: attr(data-glide-tag); position: absolute; bottom: calc(100% + 2px); left: 0; white-space: nowrap; font-size: 9px; line-height: 1.25; font-weight: 800; font-family: var(--font-sans); letter-spacing: 0.05em; padding: 1px 6px; border-radius: 999px; background-color: var(--glide-tag-color, #0d9488); color: #ffffff; }
+    .verse-poetic-label::before { content: attr(data-glide-label); position: absolute; bottom: calc(100% + 2px); left: 0; white-space: nowrap; font-size: 9px; line-height: 1.25; font-weight: 800; font-family: var(--font-sans); text-transform: uppercase; letter-spacing: 0.06em; padding: 1px 6px; border-radius: 999px; background-color: var(--glide-label-color, #10b981); color: #ffffff; }
+    .verse-poetic-anchor { background-color: color-mix(in srgb, var(--glide-anchor-color, #10b981) 14%, transparent); border-bottom: 2px solid var(--glide-anchor-color, #10b981); border-radius: 3px; padding: 1px 3px; box-decoration-break: clone; -webkit-box-decoration-break: clone; }
+    .hide-poetic-labels .verse-poetic-tag::before, .hide-poetic-labels .verse-poetic-label::before { display: none; }
     @media print {
       @page { margin: 0.6in; }
       body { padding: 0; }
@@ -1960,6 +2208,16 @@ export default function App() {
     }
   }, [appMode, syncChannel]);
 
+  const readDomVersesSnapshot = useCallback((baseVerses: Verse[] = stateRef.current.verses) => {
+    return baseVerses.map((v, i) => {
+      const el = document.getElementById(`verse-${i}`);
+      if (!el) return v;
+      const html = el.innerHTML.replace(/\u200E/g, '');
+      if (v.html === html) return v;
+      return { ...v, html };
+    });
+  }, []);
+
   const syncStateToStorage = useCallback((overrides: {
     index?: number;
     verses?: Verse[];
@@ -1976,16 +2234,11 @@ export default function App() {
     const currentVerseLayout = overrides.verseLayout !== undefined ? overrides.verseLayout : stateRef.current.verseLayout;
 
     if (overrides.forceDomRead && overrides.verses === undefined) {
-      currentVerses = stateRef.current.verses.map((v, i) => {
-        const el = document.getElementById(`verse-${i}`);
-        if (!el) return v;
-        const html = el.innerHTML.replace(/\u200E/g, '');
-        if (v.html === html) return v;
-        return { ...v, html };
-      });
+      currentVerses = readDomVersesSnapshot(stateRef.current.verses);
       
-      const hasChanged = currentVerses.some((v, i) => v.html !== stateRef.current.verses[i].html);
+      const hasChanged = currentVerses.some((v, i) => v.html !== stateRef.current.verses[i]?.html);
       if (hasChanged) {
+        stateRef.current = { ...stateRef.current, verses: currentVerses };
         setVerses(currentVerses);
         setHasUnsavedSetChanges(true);
       }
@@ -2044,7 +2297,27 @@ export default function App() {
     try {
       localStorage.setItem('osb_state', JSON.stringify(stateToSave));
     } catch (e) {}
-  }, [appMode, syncChannel]);
+  }, [appMode, readDomVersesSnapshot, syncChannel]);
+
+  const commitDomVersesToState = useCallback((overrides: {
+    index?: number;
+    poeticLinks?: PoeticLink[];
+    verseLayout?: Record<string, VerseLayout>;
+  } = {}) => {
+    const currentVerses = readDomVersesSnapshot(stateRef.current.verses);
+    const hasChanged = currentVerses.some((v, i) => v.html !== stateRef.current.verses[i]?.html);
+    if (hasChanged) {
+      stateRef.current = { ...stateRef.current, verses: currentVerses };
+      setVerses(currentVerses);
+      setHasUnsavedSetChanges(true);
+    }
+    syncStateToStorage({
+      ...overrides,
+      index: overrides.index ?? stateRef.current.activeVerseIndex,
+      verses: currentVerses
+    });
+    return currentVerses;
+  }, [readDomVersesSnapshot, syncStateToStorage]);
 
   useEffect(() => {
     if (appMode === 'control') {
@@ -2056,34 +2329,60 @@ export default function App() {
     }
   }, [activeVerseIndex, settings, translation, appMode, syncStateToStorage]);
 
+  const passageIdentity = useMemo(
+    () => `${activeSessionId}:${verses.length}:${verses[0]?.id ?? ''}:${verses[verses.length - 1]?.id ?? ''}`,
+    [activeSessionId, verses]
+  );
+
+  const versesRenderKey = useMemo(
+    () => verses.map(v => v.html || v.text).join('\x00'),
+    [verses]
+  );
+
+  const hasPoeticAnnotations = useMemo(() => {
+    if (poeticLinks.length > 0 || pendingPoeticAnchor) return true;
+    return verses.some(v => {
+      const html = v.html || '';
+      return html.includes('data-glide-label') || html.includes('data-glide-tag') || html.includes('data-glide-anchor');
+    });
+  }, [poeticLinks.length, pendingPoeticAnchor, verses]);
+
+  const showRailGutter = poeticLinks.length > 0 || !!pendingPoeticAnchor || (appMode === 'control' && toolbarMode === 'poetic' && activeTool?.type === 'poeticLink');
+  const railGutterPx = showRailGutter ? Math.min(168, 88 + Math.max(0, poeticLinks.length - 1) * 18) : 0;
+  const effectiveLineHeight = (settings.showPoeticLabels !== false && (hasPoeticAnnotations || (appMode === 'control' && toolbarMode === 'poetic')))
+    ? Math.max(settings.textSpacing, settings.textSize < 26 ? 2.35 : 2.18)
+    : settings.textSpacing;
+
   useEffect(() => {
     if (appMode === 'select' || verses.length === 0) return;
-    
+
     const container = containerRef.current;
     if (!container) return;
 
     // Use data-verse-index for reliable selection across both modes
     const targetSelector = `[data-verse-index="${activeVerseIndex}"]`;
     let firstEl = container.querySelector(targetSelector) as HTMLElement;
-    
+
     if (!firstEl) {
       firstEl = document.getElementById(`verse-${activeVerseIndex}`) as HTMLElement;
     }
 
     if (!firstEl) return;
 
-    // Calculate center of entire active group
+    // Calculate center of entire active group relative to scroll container (not intermediate relative wrappers)
     const lastIdx = Math.min(activeVerseIndex + settings.verseCount - 1, verses.length - 1);
-    const lastEl = container.querySelector(`[data-verse-index="${lastIdx}"]`) as HTMLElement || firstEl;
+    const lastEl = (container.querySelector(`[data-verse-index="${lastIdx}"]`) as HTMLElement) || firstEl;
 
-    const groupTop = firstEl.offsetTop;
-    const groupBottom = lastEl.offsetTop + lastEl.clientHeight;
+    const cRect = container.getBoundingClientRect();
+    const fRect = firstEl.getBoundingClientRect();
+    const lRect = lastEl.getBoundingClientRect();
+
+    const groupTop = fRect.top - cRect.top + container.scrollTop;
+    const groupBottom = lRect.bottom - cRect.top + container.scrollTop;
     const groupHeight = groupBottom - groupTop;
     const groupCenter = groupTop + (groupHeight / 2);
-    
-    // In control mode, we have a thick bottom toolbar
-    // In present mode, we have a reference box (if enabled)
-    // We want the text centered in the REMAINING visual space to the eye
+
+    // We want the text centered in the visual space above bottom chrome
     let chromeHeight = 0;
     if (appMode === 'control') {
       if (readingMode) {
@@ -2097,75 +2396,192 @@ export default function App() {
       chromeHeight = settings.showReferenceBox ? 140 : 40;
     }
     const visualCenter = (container.clientHeight - chromeHeight) / 2;
-    
-    // Mathematically center active group in the visual space
-    const targetScroll = Math.max(0, groupCenter - visualCenter);
-    
+
+    const maxScroll = Math.max(0, container.scrollHeight - container.clientHeight);
+    const targetScroll = Math.min(maxScroll, Math.max(0, groupCenter - visualCenter));
+
     const startScroll = container.scrollTop;
     const distance = targetScroll - startScroll;
+    if (Math.abs(distance) < 1) return;
+
     const duration = settings.scrollSpeed || 400; // ms
     const startTime = performance.now();
+    let rafId = 0;
+    let cancelled = false;
 
     const animateScroll = (currentTime: number) => {
+      if (cancelled) return;
       const elapsed = currentTime - startTime;
       const progress = Math.min(elapsed / duration, 1);
-      
-      // easeOutCubic
       const easedProgress = 1 - Math.pow(1 - progress, 3);
 
       container.scrollTop = startScroll + distance * easedProgress;
 
       if (progress < 1) {
-        requestAnimationFrame(animateScroll);
+        rafId = requestAnimationFrame(animateScroll);
       }
     };
 
-    requestAnimationFrame(animateScroll);
-  }, [activeVerseIndex, settings.scrollSpeed, settings.textSize, settings.textSpacing, settings.verseCount, settings.maxWidth, settings.oneVersePerLine, settings.showVerseNumbers, settings.showReferenceBox, toolbarMode, readingMode, verses, appMode]);
+    rafId = requestAnimationFrame(animateScroll);
+    return () => {
+      cancelled = true;
+      cancelAnimationFrame(rafId);
+    };
+  }, [activeVerseIndex, settings.scrollSpeed, settings.textSize, settings.textSpacing, settings.verseCount, settings.maxWidth, settings.oneVersePerLine, settings.showVerseNumbers, settings.showReferenceBox, settings.showPoeticLabels, toolbarMode, readingMode, passageIdentity, verses.length, appMode]);
 
   const applyFormat = useCallback((command: string, value: string | null = null, skipSync = false) => {
     document.execCommand(command, false, value ?? undefined);
     if (!skipSync) {
-      setTimeout(() => syncStateToStorage({ index: stateRef.current.activeVerseIndex, forceDomRead: true }), 50);
+      commitDomVersesToState();
     }
-  }, [syncStateToStorage]);
+  }, [commitDomVersesToState]);
 
-  const expandSelectionToWords = useCallback((selection: Selection) => {
+  const expandSelectionToWords = useCallback((selection: Selection, snapNonCollapsed = false) => {
     try {
       if (!selection || selection.rangeCount === 0) return;
       const range = selection.getRangeAt(0);
-      
-      // If already has selection, don't expand
-      if (!range.collapsed) return;
+      const isWordChar = (ch: string) => /[\p{L}\p{N}\p{M}'’\-]/u.test(ch);
+      const isTrimChar = (ch: string) => /[\s\u200E\u200F]/.test(ch);
+      const isEditableTextNode = (n: Node | null): n is Text => {
+        if (!n || n.nodeType !== Node.TEXT_NODE) return false;
+        const parent = n.parentElement;
+        if (!parent) return false;
+        if (parent.closest('[contenteditable="false"], .select-none')) return false;
+        if (!parent.closest('[id^="verse-"]')) return false;
+        return (n.textContent || '').replace(/\u200E/g, '').length > 0;
+      };
 
-      let startNode = range.startContainer;
-      let startOffset = range.startOffset;
-
-      if (startNode.nodeType === Node.ELEMENT_NODE) {
-        if (startNode.childNodes.length > 0) {
-          const childIndex = Math.min(startOffset, startNode.childNodes.length - 1);
-          startNode = startNode.childNodes[childIndex];
-          startOffset = 0;
+      const root = containerRef.current || document.body;
+      const makeTextWalker = () => document.createTreeWalker(
+        root,
+        NodeFilter.SHOW_TEXT,
+        {
+          acceptNode: (n) => (isEditableTextNode(n) ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_SKIP)
         }
-      }
-      
-      while (startNode && startNode.nodeType !== Node.TEXT_NODE && startNode.firstChild) {
-        startNode = startNode.firstChild;
+      );
+
+      if (range.collapsed) {
+        let startNode: Node = range.startContainer;
+        let startOffset = range.startOffset;
+
+        if (startNode.nodeType === Node.ELEMENT_NODE) {
+          const walker = makeTextWalker();
+          const child = startNode.childNodes[Math.min(startOffset, Math.max(0, startNode.childNodes.length - 1))];
+          walker.currentNode = child || startNode;
+          const next = walker.nextNode();
+          if (next) {
+            startNode = next;
+            startOffset = 0;
+          }
+        }
+
+        if (isEditableTextNode(startNode)) {
+          const text = startNode.textContent || '';
+          let s = Math.min(startOffset, text.length);
+          let e = s;
+          while (s > 0 && !isTrimChar(text[s - 1])) s--;
+          while (e < text.length && !isTrimChar(text[e])) e++;
+          if (s < e) {
+            const newRange = document.createRange();
+            newRange.setStart(startNode, s);
+            newRange.setEnd(startNode, e);
+            selection.removeAllRanges();
+            selection.addRange(newRange);
+          }
+        }
+        return;
       }
 
-      if (startNode && startNode.nodeType === Node.TEXT_NODE) {
-        const text = startNode.textContent || "";
-        let s = startOffset;
-        let e = startOffset;
-        
-        while (s > 0 && !text[s - 1].match(/\s/)) s--;
-        while (e < text.length && !text[e].match(/\s/)) e++;
-        
-        const newRange = document.createRange();
-        newRange.setStart(startNode, s);
-        newRange.setEnd(startNode, e);
-        selection.removeAllRanges();
-        selection.addRange(newRange);
+      if (!snapNonCollapsed) return;
+
+      let startNode: Node | null = range.startContainer;
+      let startOffset = range.startOffset;
+      let endNode: Node | null = range.endContainer;
+      let endOffset = range.endOffset;
+
+      if (startNode && startNode.nodeType === Node.ELEMENT_NODE) {
+        const walker = makeTextWalker();
+        const child = startOffset < startNode.childNodes.length ? startNode.childNodes[startOffset] : startNode;
+        walker.currentNode = child;
+        if (child.nodeType === Node.TEXT_NODE && isEditableTextNode(child)) {
+          startNode = child;
+          startOffset = 0;
+        } else {
+          const found = startOffset < startNode.childNodes.length ? walker.nextNode() : null;
+          if (found) {
+            startNode = found;
+            startOffset = 0;
+          } else {
+            walker.currentNode = startNode;
+            startNode = walker.nextNode();
+            startOffset = 0;
+          }
+        }
+      } else if (startNode && !isEditableTextNode(startNode)) {
+        const walker = makeTextWalker();
+        walker.currentNode = startNode;
+        startNode = walker.nextNode();
+        startOffset = 0;
+      }
+
+      if (endNode && endNode.nodeType === Node.ELEMENT_NODE) {
+        const walker = makeTextWalker();
+        if (endOffset > 0 && endNode.childNodes.length > 0) {
+          let target: Node = endNode.childNodes[Math.min(endOffset - 1, endNode.childNodes.length - 1)];
+          while (target.lastChild) target = target.lastChild;
+          if (isEditableTextNode(target)) {
+            endNode = target;
+            endOffset = (target.textContent || '').length;
+          } else {
+            walker.currentNode = target;
+            const prev = walker.previousNode();
+            endNode = prev;
+            endOffset = prev ? (prev.textContent || '').length : 0;
+          }
+        } else {
+          walker.currentNode = endNode;
+          const prev = walker.previousNode();
+          endNode = prev;
+          endOffset = prev ? (prev.textContent || '').length : 0;
+        }
+      } else if (endNode && !isEditableTextNode(endNode)) {
+        const walker = makeTextWalker();
+        walker.currentNode = endNode;
+        const prev = walker.previousNode();
+        endNode = prev;
+        endOffset = prev ? (prev.textContent || '').length : 0;
+      }
+
+      if (isEditableTextNode(startNode) && isEditableTextNode(endNode)) {
+        const startText = startNode.textContent || '';
+        const endText = endNode.textContent || '';
+        const sameNode = startNode === endNode;
+        if (!sameNode && (startNode.compareDocumentPosition(endNode) & Node.DOCUMENT_POSITION_PRECEDING)) {
+          return;
+        }
+
+        let s = Math.max(0, Math.min(startOffset, startText.length));
+        let e = Math.max(0, Math.min(endOffset, endText.length));
+
+        const maxS = sameNode ? e : startText.length;
+        while (s < maxS && isTrimChar(startText[s])) s++;
+        const minE = sameNode ? s : 0;
+        while (e > minE && isTrimChar(endText[e - 1])) e--;
+
+        if (s < startText.length && isWordChar(startText[s])) {
+          while (s > 0 && isWordChar(startText[s - 1])) s--;
+        }
+        if (e > 0 && isWordChar(endText[e - 1])) {
+          while (e < endText.length && isWordChar(endText[e])) e++;
+        }
+
+        if (!sameNode || s < e) {
+          const newRange = document.createRange();
+          newRange.setStart(startNode, s);
+          newRange.setEnd(endNode, e);
+          selection.removeAllRanges();
+          selection.addRange(newRange);
+        }
       }
     } catch (e) {}
   }, []);
@@ -2194,56 +2610,171 @@ export default function App() {
       range.insertNode(span);
       selection.removeAllRanges();
       if (!skipSync) {
-        setTimeout(() => syncStateToStorage({ index: stateRef.current.activeVerseIndex, forceDomRead: true }), 100);
+        commitDomVersesToState();
       }
     } catch (e) {}
-  }, [syncStateToStorage]);
+  }, [commitDomVersesToState]);
+
+  const unwrapSpanElement = useCallback((el: HTMLElement) => {
+    const parent = el.parentNode;
+    if (!parent) return;
+    while (el.firstChild) {
+      parent.insertBefore(el.firstChild, el);
+    }
+    parent.removeChild(el);
+    if (parent instanceof HTMLElement) parent.normalize();
+  }, []);
+
+  const unwrapSelectorInside = useCallback((root: ParentNode, selector: string) => {
+    const matches = Array.from(root.querySelectorAll(selector)) as HTMLElement[];
+    matches.forEach(node => {
+      const parent = node.parentNode;
+      if (!parent) return;
+      while (node.firstChild) {
+        parent.insertBefore(node.firstChild, node);
+      }
+      parent.removeChild(node);
+    });
+  }, []);
+
+  const cleanupEmptyPoeticSpans = useCallback((verseEl: HTMLElement | null) => {
+    if (!verseEl) return;
+    verseEl.querySelectorAll('.verse-poetic-label, .verse-poetic-tag, .verse-poetic-anchor').forEach(el => {
+      if ((el.textContent || '').replace(/\u200E/g, '').trim() === '') {
+        el.parentNode?.removeChild(el);
+      }
+    });
+  }, []);
+
+  const resolveSingleVerseRange = useCallback((rawRange: Range): { verseEl: HTMLElement; range: Range } | null => {
+    const container = containerRef.current;
+    if (!container) return null;
+
+    let verseEl = (
+      rawRange.startContainer.nodeType === Node.ELEMENT_NODE
+        ? (rawRange.startContainer as HTMLElement)
+        : rawRange.startContainer.parentElement
+    )?.closest('[id^="verse-"]') as HTMLElement | null;
+
+    if (!verseEl) {
+      const candidates = Array.from(container.querySelectorAll('[id^="verse-"]')) as HTMLElement[];
+      verseEl = candidates.find(v => {
+        if (!rawRange.intersectsNode(v)) return false;
+        const probe = rawRange.cloneRange();
+        if (!v.contains(probe.startContainer)) probe.setStart(v, 0);
+        if (!v.contains(probe.endContainer)) probe.setEnd(v, v.childNodes.length);
+        return !probe.collapsed && probe.toString().replace(/\u200E/g, '').trim().length > 0;
+      }) || null;
+    }
+    if (!verseEl) return null;
+
+    const range = rawRange.cloneRange();
+    if (!verseEl.contains(range.startContainer)) {
+      range.setStart(verseEl, 0);
+    }
+    if (!verseEl.contains(range.endContainer)) {
+      range.setEnd(verseEl, verseEl.childNodes.length);
+    }
+    if (range.collapsed || range.toString().replace(/\u200E/g, '').trim().length === 0) return null;
+    return { verseEl, range };
+  }, []);
+
+  const removePoeticAnnotationEl = useCallback((el: HTMLElement) => {
+    if (!el || !containerRef.current?.contains(el)) return;
+    const anchorId = el.getAttribute('data-glide-anchor');
+    unwrapSpanElement(el);
+    commitDomVersesToState();
+    if (anchorId && pendingPoeticAnchor?.anchorId === anchorId) {
+      setPendingPoeticAnchor(null);
+    }
+  }, [commitDomVersesToState, pendingPoeticAnchor, unwrapSpanElement]);
+
+  const stylePoeticHighlightSpan = (span: HTMLSpanElement, attr: 'data-glide-tag' | 'data-glide-label', cssVar: string, labelValue: string, color: string, alphaFloor: number) => {
+    const intensity = Math.max(stateRef.current.settings.highlightIntensity || 0.25, alphaFloor);
+    const clean = color.replace('#', '');
+    const r = /^[0-9a-fA-F]{6}$/.test(clean) ? parseInt(clean.slice(0, 2), 16) : 16;
+    const g = /^[0-9a-fA-F]{6}$/.test(clean) ? parseInt(clean.slice(2, 4), 16) : 185;
+    const b = /^[0-9a-fA-F]{6}$/.test(clean) ? parseInt(clean.slice(4, 6), 16) : 129;
+    span.setAttribute(attr, labelValue);
+    span.style.setProperty(cssVar, color);
+    span.style.backgroundColor = `rgba(${r},${g},${b},${intensity.toFixed(2)})`;
+    span.style.borderBottom = `2px solid ${color}`;
+  };
 
   const applyPoeticTag = useCallback((tagText: string, tagColor: string, skipSync = false) => {
     const selection = window.getSelection();
     if (!selection || selection.rangeCount === 0) return;
-    const range = selection.getRangeAt(0);
-    if (range.collapsed) return;
+    const resolved = resolveSingleVerseRange(selection.getRangeAt(0));
+    if (!resolved) return;
+    const { verseEl, range } = resolved;
+
+    const startTagEl = (range.startContainer.nodeType === Node.ELEMENT_NODE ? range.startContainer as HTMLElement : range.startContainer.parentElement)?.closest('.verse-poetic-tag') as HTMLSpanElement | null;
+    const endTagEl = (range.endContainer.nodeType === Node.ELEMENT_NODE ? range.endContainer as HTMLElement : range.endContainer.parentElement)?.closest('.verse-poetic-tag') as HTMLSpanElement | null;
+
+    if (startTagEl && startTagEl === endTagEl && startTagEl.textContent?.replace(/\u200E/g, '').trim() === range.toString().replace(/\u200E/g, '').trim()) {
+      stylePoeticHighlightSpan(startTagEl, 'data-glide-tag', '--glide-tag-color', tagText, tagColor, 0.24);
+      selection.removeAllRanges();
+      if (!skipSync) {
+        commitDomVersesToState();
+      }
+      return;
+    }
 
     const span = document.createElement('span');
     span.className = 'verse-markup verse-poetic-tag';
-    span.setAttribute('data-glide-tag', tagText);
-    span.style.setProperty('--glide-tag-color', tagColor);
-    span.style.backgroundColor = `rgba(${parseInt(tagColor.slice(1, 3), 16)},${parseInt(tagColor.slice(3, 5), 16)},${parseInt(tagColor.slice(5, 7), 16)},0.14)`;
-    span.style.borderBottom = `2px solid ${tagColor}`;
+    stylePoeticHighlightSpan(span, 'data-glide-tag', '--glide-tag-color', tagText, tagColor, 0.24);
 
     try {
       const contents = range.extractContents();
+      unwrapSelectorInside(contents, '.verse-poetic-tag');
       span.appendChild(contents);
       range.insertNode(span);
+      cleanupEmptyPoeticSpans(verseEl);
       selection.removeAllRanges();
       if (!skipSync) {
-        setTimeout(() => syncStateToStorage({ index: stateRef.current.activeVerseIndex, forceDomRead: true }), 100);
+        commitDomVersesToState();
       }
     } catch (e) {}
-  }, [syncStateToStorage]);
+  }, [cleanupEmptyPoeticSpans, commitDomVersesToState, resolveSingleVerseRange, unwrapSelectorInside]);
 
   const applyPoeticLabel = useCallback((labelText: string, labelColor: string, skipSync = false) => {
     const selection = window.getSelection();
     if (!selection || selection.rangeCount === 0) return;
-    const range = selection.getRangeAt(0);
-    if (range.collapsed) return;
+    const resolved = resolveSingleVerseRange(selection.getRangeAt(0));
+    if (!resolved) return;
+    const { verseEl, range } = resolved;
+
+    const cleanLabel = labelText.trim().toUpperCase();
+    if (!cleanLabel) return;
+
+    const startLblEl = (range.startContainer.nodeType === Node.ELEMENT_NODE ? range.startContainer as HTMLElement : range.startContainer.parentElement)?.closest('.verse-poetic-label') as HTMLSpanElement | null;
+    const endLblEl = (range.endContainer.nodeType === Node.ELEMENT_NODE ? range.endContainer as HTMLElement : range.endContainer.parentElement)?.closest('.verse-poetic-label') as HTMLSpanElement | null;
+
+    if (startLblEl && startLblEl === endLblEl && startLblEl.textContent?.replace(/\u200E/g, '').trim() === range.toString().replace(/\u200E/g, '').trim()) {
+      stylePoeticHighlightSpan(startLblEl, 'data-glide-label', '--glide-label-color', cleanLabel, labelColor, 0.25);
+      selection.removeAllRanges();
+      if (!skipSync) {
+        commitDomVersesToState();
+      }
+      return;
+    }
 
     const span = document.createElement('span');
     span.className = 'verse-markup verse-poetic-label';
-    span.setAttribute('data-glide-label', labelText);
-    span.style.setProperty('--glide-label-color', labelColor);
+    stylePoeticHighlightSpan(span, 'data-glide-label', '--glide-label-color', cleanLabel, labelColor, 0.25);
 
     try {
       const contents = range.extractContents();
+      unwrapSelectorInside(contents, '.verse-poetic-label');
       span.appendChild(contents);
       range.insertNode(span);
+      cleanupEmptyPoeticSpans(verseEl);
       selection.removeAllRanges();
       if (!skipSync) {
-        setTimeout(() => syncStateToStorage({ index: stateRef.current.activeVerseIndex, forceDomRead: true }), 100);
+        commitDomVersesToState();
       }
     } catch (e) {}
-  }, [syncStateToStorage]);
+  }, [cleanupEmptyPoeticSpans, commitDomVersesToState, resolveSingleVerseRange, unwrapSelectorInside]);
 
   const unwrapDomAnchorById = useCallback((anchorId: string) => {
     const container = containerRef.current;
@@ -2262,36 +2793,28 @@ export default function App() {
   const cancelPendingPoeticAnchor = useCallback(() => {
     if (!pendingPoeticAnchor) return;
     unwrapDomAnchorById(pendingPoeticAnchor.anchorId);
+    commitDomVersesToState();
     setPendingPoeticAnchor(null);
-    setTimeout(() => syncStateToStorage({ index: stateRef.current.activeVerseIndex, forceDomRead: true }), 80);
-  }, [pendingPoeticAnchor, unwrapDomAnchorById, syncStateToStorage]);
+  }, [commitDomVersesToState, pendingPoeticAnchor, unwrapDomAnchorById]);
 
-  const applyPoeticAnchorStep = useCallback((colorOverride?: string) => {
+  const applyPoeticAnchorStep = useCallback((colorOverride?: string, typeOverride?: 'inclusio' | 'parallel' | 'chiasm') => {
     const selection = window.getSelection();
     if (!selection || selection.rangeCount === 0) return;
-    const rawRange = selection.getRangeAt(0);
-    if (rawRange.collapsed) return;
+    expandSelectionToWords(selection, true);
+    if (selection.rangeCount === 0) return;
+
+    const resolved = resolveSingleVerseRange(selection.getRangeAt(0));
+    if (!resolved) return;
+    const { verseEl, range } = resolved;
 
     const container = containerRef.current;
     if (!container) return;
 
-    const verseEl = (
-      rawRange.startContainer.nodeType === Node.ELEMENT_NODE
-        ? (rawRange.startContainer as HTMLElement)
-        : rawRange.startContainer.parentElement
-    )?.closest('[id^="verse-"]') as HTMLElement | null;
-    if (!verseEl) return;
-
-    const range = rawRange.cloneRange();
-    if (!verseEl.contains(range.endContainer)) {
-      range.setEnd(verseEl, verseEl.childNodes.length);
-    }
-    if (range.collapsed) return;
-
     const verseWrapper = verseEl.closest('[data-verse-index]');
     const verseIndex = verseWrapper ? parseInt(verseWrapper.getAttribute('data-verse-index') || '0', 10) : stateRef.current.activeVerseIndex;
 
-    const meta = POETIC_LINK_META[poeticLinkType];
+    const effectiveType = typeOverride || poeticLinkType;
+    const meta = POETIC_LINK_META[effectiveType];
 
     if (!pendingPoeticAnchor) {
       const anchorId = `anc-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
@@ -2301,15 +2824,17 @@ export default function App() {
       span.setAttribute('data-glide-anchor', anchorId);
       span.setAttribute('data-glide-anchor-label', `${meta.label} 1/2`);
       span.style.setProperty('--glide-anchor-color', color);
-      span.style.backgroundColor = `rgba(${parseInt(color.slice(1, 3), 16)},${parseInt(color.slice(3, 5), 16)},${parseInt(color.slice(5, 7), 16)},0.12)`;
+      span.style.backgroundColor = `rgba(${parseInt(color.slice(1, 3), 16)},${parseInt(color.slice(3, 5), 16)},${parseInt(color.slice(5, 7), 16)},0.16)`;
 
       try {
         const contents = range.extractContents();
         span.appendChild(contents);
         range.insertNode(span);
+        cleanupEmptyPoeticSpans(verseEl);
         selection.removeAllRanges();
-        setPendingPoeticAnchor({ anchorId, verseIndex, type: poeticLinkType, color });
-        setTimeout(() => syncStateToStorage({ index: stateRef.current.activeVerseIndex, forceDomRead: true }), 80);
+        // Commit DOM -> React verses BEFORE setPendingPoeticAnchor triggers a re-render
+        commitDomVersesToState();
+        setPendingPoeticAnchor({ anchorId, verseIndex, type: effectiveType, color });
       } catch (e) {}
       return;
     }
@@ -2321,12 +2846,13 @@ export default function App() {
     span.setAttribute('data-glide-anchor', toAnchorId);
     span.setAttribute('data-glide-anchor-label', linkMeta.label);
     span.style.setProperty('--glide-anchor-color', pendingPoeticAnchor.color);
-    span.style.backgroundColor = `rgba(${parseInt(pendingPoeticAnchor.color.slice(1, 3), 16)},${parseInt(pendingPoeticAnchor.color.slice(3, 5), 16)},${parseInt(pendingPoeticAnchor.color.slice(5, 7), 16)},0.12)`;
+    span.style.backgroundColor = `rgba(${parseInt(pendingPoeticAnchor.color.slice(1, 3), 16)},${parseInt(pendingPoeticAnchor.color.slice(3, 5), 16)},${parseInt(pendingPoeticAnchor.color.slice(5, 7), 16)},0.16)`;
 
     try {
       const contents = range.extractContents();
       span.appendChild(contents);
       range.insertNode(span);
+      cleanupEmptyPoeticSpans(verseEl);
       selection.removeAllRanges();
 
       const firstAnchorEl = container.querySelector(`[data-glide-anchor="${pendingPoeticAnchor.anchorId}"]`);
@@ -2343,23 +2869,13 @@ export default function App() {
         toAnchorId
       };
 
-      const updatedVerses = stateRef.current.verses.map((v, i) => {
-        const el = document.getElementById(`verse-${i}`);
-        if (!el) return v;
-        return { ...v, html: el.innerHTML.replace(/\u200E/g, '') };
-      });
       const updatedLinks = [...stateRef.current.poeticLinks, newLink];
-      setVerses(updatedVerses);
       setPoeticLinks(updatedLinks);
-      setPendingPoeticAnchor(null);
       setHasUnsavedSetChanges(true);
-      syncStateToStorage({
-        index: stateRef.current.activeVerseIndex,
-        verses: updatedVerses,
-        poeticLinks: updatedLinks
-      });
+      commitDomVersesToState({ poeticLinks: updatedLinks });
+      setPendingPoeticAnchor(null);
     } catch (e) {}
-  }, [pendingPoeticAnchor, poeticLinkType, setPoeticLinks, setVerses, syncStateToStorage]);
+  }, [cleanupEmptyPoeticSpans, commitDomVersesToState, expandSelectionToWords, pendingPoeticAnchor, poeticLinkType, resolveSingleVerseRange, setPoeticLinks]);
 
   const removePoeticLink = useCallback((linkId: string) => {
     const target = stateRef.current.poeticLinks.find(l => l.id === linkId);
@@ -2368,25 +2884,27 @@ export default function App() {
     unwrapDomAnchorById(target.fromAnchorId);
     unwrapDomAnchorById(target.toAnchorId);
 
-    const updatedVerses = stateRef.current.verses.map((v, i) => {
-      const el = document.getElementById(`verse-${i}`);
-      if (el) return { ...v, html: el.innerHTML.replace(/\u200E/g, '') };
-      return v;
-    });
     const nextLinks = stateRef.current.poeticLinks.filter(l => l.id !== linkId);
-
-    setVerses(updatedVerses);
     setPoeticLinks(nextLinks);
     setHasUnsavedSetChanges(true);
-    syncStateToStorage({
-      index: stateRef.current.activeVerseIndex,
-      verses: updatedVerses,
-      poeticLinks: nextLinks
-    });
-  }, [setPoeticLinks, setVerses, syncStateToStorage, unwrapDomAnchorById]);
+    commitDomVersesToState({ poeticLinks: nextLinks });
+  }, [commitDomVersesToState, setPoeticLinks, unwrapDomAnchorById]);
+
+  const getTargetVerseIndexForLayout = useCallback(() => {
+    const sel = window.getSelection();
+    const anchor = sel?.anchorNode;
+    if (anchor && containerRef.current?.contains(anchor)) {
+      const el = (anchor.nodeType === Node.ELEMENT_NODE ? anchor as HTMLElement : anchor.parentElement)?.closest('[data-verse-index]');
+      if (el) {
+        const idx = parseInt(el.getAttribute('data-verse-index') || '', 10);
+        if (!Number.isNaN(idx)) return idx;
+      }
+    }
+    return stateRef.current.activeVerseIndex;
+  }, []);
 
   const toggleActiveVerseIndent = useCallback(() => {
-    const idx = stateRef.current.activeVerseIndex;
+    const idx = getTargetVerseIndexForLayout();
     const verse = stateRef.current.verses[idx];
     if (!verse) return;
 
@@ -2405,10 +2923,10 @@ export default function App() {
     setVerseLayout(nextLayout);
     setHasUnsavedSetChanges(true);
     syncStateToStorage({ verseLayout: nextLayout });
-  }, [setVerseLayout, syncStateToStorage]);
+  }, [getTargetVerseIndexForLayout, setVerseLayout, syncStateToStorage]);
 
   const toggleActiveVerseStanzaBreak = useCallback(() => {
-    const idx = stateRef.current.activeVerseIndex;
+    const idx = getTargetVerseIndexForLayout();
     const verse = stateRef.current.verses[idx];
     if (!verse) return;
 
@@ -2427,7 +2945,7 @@ export default function App() {
     setVerseLayout(nextLayout);
     setHasUnsavedSetChanges(true);
     syncStateToStorage({ verseLayout: nextLayout });
-  }, [setVerseLayout, syncStateToStorage]);
+  }, [getTargetVerseIndexForLayout, setVerseLayout, syncStateToStorage]);
 
   const applyShape = useCallback((type: 'circle' | 'box', color: string, skipSync = false) => {
     const selection = window.getSelection();
@@ -2450,10 +2968,10 @@ export default function App() {
       range.insertNode(span);
       selection.removeAllRanges();
       if (!skipSync) {
-        setTimeout(() => syncStateToStorage({ index: stateRef.current.activeVerseIndex, forceDomRead: true }), 100);
+        commitDomVersesToState();
       }
     } catch (e) {}
-  }, [syncStateToStorage]);
+  }, [commitDomVersesToState]);
 
   const applyEraser = useCallback((skipSync = false) => {
     const selection = window.getSelection();
@@ -2505,33 +3023,37 @@ export default function App() {
       }
     } catch (e) {}
     if (!skipSync) {
-      setTimeout(() => syncStateToStorage({ forceDomRead: true }), 100);
+      commitDomVersesToState();
     }
-  }, [syncStateToStorage]);
+  }, [commitDomVersesToState]);
 
   const clearFormatting = useCallback(() => {
     applyEraser();
   }, [applyEraser]);
 
   const applyMarkup = useCallback((toolOverride?: { type: string; value: string | null }) => {
-    const tool = toolOverride || activeTool;
+    const tool = toolOverride || activeTool || (pendingPoeticAnchor ? { type: 'poeticLink', value: pendingPoeticAnchor.type } : null);
     if (!tool) return;
     const selection = window.getSelection();
     if (!selection) return;
 
-    if (selection.isCollapsed) {
-      expandSelectionToWords(selection);
+    const shouldSnapWholeWords = toolbarMode === 'poetic' || tool.type.startsWith('poetic');
+    if (selection.isCollapsed || shouldSnapWholeWords) {
+      expandSelectionToWords(selection, shouldSnapWholeWords);
     }
 
     const freshSelection = window.getSelection();
     if (!freshSelection || freshSelection.rangeCount === 0) return;
-    
+
     const isEraser = tool.type === 'eraser';
-    const hasSelection = freshSelection.toString().length > 0;
+    const hasSelection = freshSelection.toString().replace(/\u200E/g, '').trim().length > 0;
     if (!isEraser && !hasSelection) return;
 
-    if (tool.type === 'poeticLink') {
-      applyPoeticAnchorStep();
+    if (tool.type === 'poeticLink' || (pendingPoeticAnchor && !toolOverride && !isEraser)) {
+      const linkKind = (tool.value === 'inclusio' || tool.value === 'parallel' || tool.value === 'chiasm')
+        ? tool.value
+        : pendingPoeticAnchor?.type;
+      applyPoeticAnchorStep(undefined, linkKind);
       return;
     }
 
@@ -2542,10 +3064,10 @@ export default function App() {
     const container = containerRef.current;
     if (!container) return;
 
-    // Collect involved verses and their sub-ranges FIRST
+    // Collect involved verses and their non-empty sub-ranges FIRST
     const allVerses = Array.from(container.querySelectorAll('[id^="verse-"]'));
     const verseTasks: { el: HTMLElement, startContainer: Node, startOffset: number, endContainer: Node, endOffset: number }[] = [];
-    
+
     const startContainer = range.startContainer;
     const startOffset = range.startOffset;
     const endContainer = range.endContainer;
@@ -2572,7 +3094,14 @@ export default function App() {
           vEndOff = el.childNodes.length;
         }
 
-        verseTasks.push({ el, startContainer: vStartNode, startOffset: vStartOff, endContainer: vEndNode, endOffset: vEndOff });
+        try {
+          const probe = document.createRange();
+          probe.setStart(vStartNode, vStartOff);
+          probe.setEnd(vEndNode, vEndOff);
+          if (!probe.collapsed && (isEraser || probe.toString().replace(/\u200E/g, '').trim().length > 0)) {
+            verseTasks.push({ el, startContainer: vStartNode, startOffset: vStartOff, endContainer: vEndNode, endOffset: vEndOff });
+          }
+        } catch (e) {}
       }
     });
 
@@ -2588,7 +3117,7 @@ export default function App() {
             if (sel) {
               sel.removeAllRanges();
               sel.addRange(vRange);
-              
+
               if (isEraser) applyEraser(true);
               else if (tool.type === 'underlineColor') applyUnderline(activeMarkupColor, true);
               else if (tool.type === 'underlineWavy') applyUnderline(activeMarkupColor, true, 'wavy');
@@ -2608,30 +3137,39 @@ export default function App() {
         } catch (e) { console.warn("Verse task failed", e); }
       });
 
+      commitDomVersesToState();
       if (tool.type === 'poeticTag') {
         setPoeticStepIndex((poeticStepIndex + 1) % poeticSteps.length);
       }
-      
+
       window.getSelection()?.removeAllRanges();
       const finalRange = document.createRange();
       finalRange.setStartBefore(verseTasks[0].el);
       finalRange.setEndAfter(verseTasks[verseTasks.length - 1].el);
       window.getSelection()?.addRange(finalRange);
-      
-      setTimeout(() => syncStateToStorage({ forceDomRead: true }), 200);
       return;
+    }
+
+    if (verseTasks.length === 1) {
+      try {
+        const clamped = document.createRange();
+        clamped.setStart(verseTasks[0].startContainer, verseTasks[0].startOffset);
+        clamped.setEnd(verseTasks[0].endContainer, verseTasks[0].endOffset);
+        freshSelection.removeAllRanges();
+        freshSelection.addRange(clamped);
+      } catch (e) {}
     }
 
     const node = freshSelection.anchorNode;
     if (!node) return;
-    
+
     let isInsideEditable = false;
     let curr: Node | null = node;
     while (curr && curr !== document.body) {
       if (curr === containerRef.current) { isInsideEditable = true; break; }
       curr = curr.parentNode;
     }
-    
+
     if (isInsideEditable) {
       if (isEraser) clearFormatting();
       else if (tool.type === 'underlineColor') applyUnderline(activeMarkupColor);
@@ -2651,7 +3189,7 @@ export default function App() {
         applyFormat(type, finalValue);
       }
     }
-  }, [activeMarkupColor, activeTool, applyFormat, applyUnderline, applyPoeticTag, applyPoeticLabel, applyPoeticAnchorStep, applyEraser, applyShape, clearFormatting, expandSelectionToWords, poeticLabelPreset, poeticSequenceMode, poeticStepIndex, syncStateToStorage]);
+  }, [activeMarkupColor, activeTool, applyFormat, applyUnderline, applyPoeticTag, applyPoeticLabel, applyPoeticAnchorStep, applyEraser, applyShape, clearFormatting, commitDomVersesToState, expandSelectionToWords, pendingPoeticAnchor, poeticLabelPreset, poeticSequenceMode, poeticStepIndex, toolbarMode]);
 
   const applyActiveTool = useCallback(() => {
     applyMarkup();
@@ -2665,17 +3203,23 @@ export default function App() {
   }, []);
 
   const toggleTool = useCallback((type: string, value: string | null = null) => {
-    if (activeTool && activeTool.type === type && activeTool.value === value) {
+    const selection = window.getSelection();
+    const hasNonEmptySelection = !!(selection && !selection.isCollapsed && selection.toString().replace(/\u200E/g, '').trim().length > 0 && containerRef.current?.contains(selection.anchorNode));
+    if (!hasNonEmptySelection && type === 'poeticLink' && pendingPoeticAnchor) {
+      cancelPendingPoeticAnchor();
+      setActiveTool(null);
+      return;
+    }
+    if (!hasNonEmptySelection && activeTool && activeTool.type === type && activeTool.value === value) {
       setActiveTool(null);
     } else {
       const newTool = { type, value };
       setActiveTool(newTool);
-      const selection = window.getSelection();
-      if (selection && selection.toString().length > 0) {
+      if (hasNonEmptySelection) {
         applyMarkup(newTool);
       }
     }
-  }, [activeTool, applyMarkup]);
+  }, [activeTool, applyMarkup, cancelPendingPoeticAnchor, pendingPoeticAnchor]);
 
   const clearAllFormatting = useCallback(() => {
     if (!window.confirm("Clear all markup and formatting from the current passage?")) return;
@@ -3324,25 +3868,29 @@ export default function App() {
         )}
 
         <div className="h-[40vh] flex-shrink-0" />
-        <div className={`w-full ${poeticLinks.length > 0 ? 'px-14 md:px-24 lg:px-28' : 'px-6 md:px-12 lg:px-16'}`}>
+        <div className="w-full px-6 md:px-12 lg:px-16">
         <div
           ref={presentWrapperRef}
-          className={`relative mx-auto w-full transition-all duration-300 ${settings.showPoeticLabels === false ? 'hide-poetic-labels' : ''} ${settings.oneVersePerLine ? 'flex flex-col gap-12' : 'text-start tracking-wide'}`}
+          className={`relative mx-auto w-full transition-[font-size,opacity] duration-300 ${settings.showPoeticLabels === false ? 'hide-poetic-labels' : ''} ${settings.oneVersePerLine ? 'flex flex-col gap-12' : 'text-start tracking-wide'}`}
           style={{ 
             fontSize: `${settings.textSize}px`, 
-            lineHeight: settings.textSpacing, 
+            lineHeight: effectiveLineHeight, 
             maxWidth: `${settings.maxWidth}px`,
-            paddingBottom: '40vh'
+            paddingBottom: '40vh',
+            ...(railGutterPx > 0 ? (translation === 'wlc' ? { paddingRight: `${railGutterPx}px` } : { paddingLeft: `${railGutterPx}px` }) : {})
           }}
         >
           <PoeticGutterOverlay
             wrapperRef={presentWrapperRef}
             poeticLinks={poeticLinks}
+            pendingPoeticAnchor={null}
             activeVerseIndex={activeVerseIndex}
             verseCount={settings.verseCount}
             isRtl={translation === 'wlc'}
             isControl={false}
-            depsKey={`${activeSessionId}-${verses.length}-${settings.textSize}-${settings.textSpacing}-${settings.maxWidth}-${settings.oneVersePerLine}-${JSON.stringify(verseLayout)}`}
+            showLabels={settings.showPoeticLabels !== false}
+            isPoeticEditing={false}
+            depsKey={`${activeSessionId}-${versesRenderKey}-${settings.textSize}-${effectiveLineHeight}-${settings.maxWidth}-${settings.oneVersePerLine}-${JSON.stringify(verseLayout)}-${poeticLinks.length}`}
           />
           {verses.map((verse, index) => {
             const fullRef = verse.reference.split(' ').pop() || '';
@@ -3389,11 +3937,11 @@ export default function App() {
                       >
                         {verseNumber}
                       </span>
-                    )}                    <span
+                    )}                    <MemoVerseHtml
                       id={isActive ? `verse-${index}` : `present-verse-${index}`}
-                      className={`transition-all outline-none leading-relaxed ${isActive ? '' : isLinkedPartner ? 'opacity-70' : 'opacity-20 blur-[2px]'}`}
+                      className={`transition-all outline-none ${isActive ? '' : isLinkedPartner ? 'opacity-70' : 'opacity-20 blur-[2px]'}`}
                       style={{ transitionDuration: `${settings.scrollSpeed}ms` }}
-                      dangerouslySetInnerHTML={{ __html: (verse.html || verse.text) + (isRtl ? '' : '\u200E') }}
+                      html={(verse.html || verse.text) + (isRtl ? '' : '\u200E')}
                     />
                   </div>
                   {!isBlock && <span className="inline"> </span>}
@@ -4407,8 +4955,19 @@ export default function App() {
           ref={containerRef} 
           className="flex-1 overflow-y-auto px-6 md:px-12 lg:px-16 flex flex-col no-scrollbar relative h-full transition-colors duration-500" 
           style={{ backgroundColor: settings.pageColor, fontFamily: activeFont.css, color: settings.theme === 'dark' ? '#f8fafc' : '#0f172a' }}
+          onMouseDown={(e) => {
+            mouseDownPointRef.current = { x: e.clientX, y: e.clientY };
+          }}
           onInput={() => appMode === 'control' && syncStateToStorage({ index: activeVerseIndex, forceDomRead: true })}
-          onMouseUp={() => appMode === 'control' && applyActiveTool()}
+          onMouseUp={() => {
+            if (appMode !== 'control') return;
+            const sel = window.getSelection();
+            if (sel && sel.toString().length > 0 && (activeTool || pendingPoeticAnchor)) {
+              suppressNextVerseClickRef.current = true;
+              setTimeout(() => { suppressNextVerseClickRef.current = false; }, 160);
+            }
+            applyActiveTool();
+          }}
           onDrop={(e) => {
             if (e.dataTransfer?.files && e.dataTransfer.files.length > 0) return;
             if (appMode === 'control') {
@@ -4421,19 +4980,29 @@ export default function App() {
         <div
           ref={controlWrapperRef}
           key={`${activeSessionId}-${resetKey}`}
-          className={`relative mx-auto w-full transition-all duration-300 select-text ${settings.showPoeticLabels === false ? 'hide-poetic-labels' : ''} ${poeticLinks.length > 0 ? 'pl-10 pr-10 md:pl-14 md:pr-14' : ''} ${settings.oneVersePerLine ? 'flex flex-col gap-8' : 'text-start tracking-wide'}`}
-          style={{ fontSize: `${settings.textSize}px`, lineHeight: settings.textSpacing, paddingBottom: '40vh', maxWidth: `${settings.maxWidth}px` }}
+          className={`relative mx-auto w-full transition-[font-size,opacity] duration-300 select-text ${settings.showPoeticLabels === false ? 'hide-poetic-labels' : ''} ${settings.oneVersePerLine ? 'flex flex-col gap-8' : 'text-start tracking-wide'}`}
+          style={{
+            fontSize: `${settings.textSize}px`,
+            lineHeight: effectiveLineHeight,
+            paddingBottom: '40vh',
+            maxWidth: `${settings.maxWidth}px`,
+            ...(railGutterPx > 0 ? (translation === 'wlc' ? { paddingRight: `${railGutterPx}px` } : { paddingLeft: `${railGutterPx}px` }) : {})
+          }}
           dir={translation === 'wlc' ? 'rtl' : 'ltr'}
         >
           <PoeticGutterOverlay
             wrapperRef={controlWrapperRef}
             poeticLinks={poeticLinks}
+            pendingPoeticAnchor={pendingPoeticAnchor}
             activeVerseIndex={activeVerseIndex}
             verseCount={settings.verseCount}
             isRtl={translation === 'wlc'}
             isControl={true}
+            showLabels={settings.showPoeticLabels !== false}
+            isPoeticEditing={toolbarMode === 'poetic'}
             onRemoveLink={removePoeticLink}
-            depsKey={`${activeSessionId}-${resetKey}-${verses.length}-${settings.textSize}-${settings.textSpacing}-${settings.maxWidth}-${settings.oneVersePerLine}-${JSON.stringify(verseLayout)}`}
+            onRemoveAnnotation={removePoeticAnnotationEl}
+            depsKey={`${activeSessionId}-${resetKey}-${versesRenderKey}-${settings.textSize}-${effectiveLineHeight}-${settings.maxWidth}-${settings.oneVersePerLine}-${JSON.stringify(verseLayout)}-${toolbarMode}-${poeticLinks.length}-${pendingPoeticAnchor?.anchorId || ''}`}
           />
           {verses.map((verse, index) => {
             const fullRef = verse.reference.split(' ').pop() || '';
@@ -4464,9 +5033,9 @@ export default function App() {
                     ...(indentLevel > 0 ? { paddingInlineStart: `${indentLevel * 2.2}em` } : {})
                   }}
                   data-verse-index={index}
-                  onMouseDown={(e) => {
-                    // Only change focus if clicking a backgrounded verse
-                    if (appMode === 'control' && !isActive) {
+                  onMouseDown={() => {
+                    // In Poetic Mode keep viewport steady while selecting across verses; click handler moves focus on tap
+                    if (appMode === 'control' && !isActive && toolbarMode !== 'poetic') {
                       setActiveVerseIndex(index);
                       syncStateToStorage({ index });
                     }
@@ -4483,39 +5052,47 @@ export default function App() {
                       <span
                         contentEditable={false} 
                         style={{ color: settings.verseNumberColor }}
-                        className={`select-none font-bold text-[0.6em] align-top mt-[0.2em] inline-block shrink-0 transition-all ${isRtl ? 'ml-2' : 'mr-2'} ${isActive ? 'opacity-50' : isLinkedPartner ? 'opacity-35' : 'opacity-10 blur-[2px]'}`}
+                        className={`select-none font-bold text-[0.6em] align-top mt-[0.2em] inline-block shrink-0 transition-all ${isRtl ? 'ml-2' : 'mr-2'} ${isActive ? 'opacity-50' : toolbarMode === 'poetic' ? 'opacity-45' : isLinkedPartner ? 'opacity-35' : 'opacity-10 blur-[2px]'}`}
                       >
                         {verseNumber}
                       </span>
                     )}
-                    <span 
-                      id={`verse-${index}`} 
-                      dir="auto" 
-                      className={`outline-none transition-all ${appMode === 'control' ? 'cursor-text' : ''} ${isBlock ? 'flex-1' : 'inline'} ${isRtl ? 'text-right' : ''} ${isActive ? 'font-medium opacity-100' : isLinkedPartner ? 'font-normal opacity-65' : 'font-normal opacity-15'}`}
+                    <MemoVerseHtml
+                      id={`verse-${index}`}
+                      dir="auto"
+                      className={`outline-none transition-all ${appMode === 'control' ? 'cursor-text' : ''} ${isBlock ? 'flex-1' : 'inline'} ${isRtl ? 'text-right' : ''} ${isActive ? 'font-medium opacity-100' : toolbarMode === 'poetic' ? 'font-normal opacity-75 hover:opacity-95' : isLinkedPartner ? 'font-normal opacity-65' : 'font-normal opacity-15'}`}
                       style={{ transitionDuration: `${settings.scrollSpeed}ms` }}
-                      contentEditable={appMode === 'control'} 
-                      suppressContentEditableWarning={true} 
-                      dangerouslySetInnerHTML={{ __html: (verse.html || verse.text) + (isRtl ? '' : '\u200E') }}
+                      contentEditable={appMode === 'control'}
+                      suppressContentEditableWarning={true}
+                      html={(verse.html || verse.text) + (isRtl ? '' : '\u200E')}
+                      onKeyDown={(e) => {
+                        if (appMode === 'control' && toolbarMode === 'poetic' && e.key === 'Enter' && !e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey) {
+                          e.preventDefault();
+                          document.execCommand('insertLineBreak');
+                          commitDomVersesToState();
+                        }
+                      }}
                       onDrop={(e) => {
                         if (e.dataTransfer?.files && e.dataTransfer.files.length > 0) return;
                         e.preventDefault();
                         return false;
                       }}
                       onClick={(e) => {
-                        if (appMode === 'control') {
-                          // Prevent focus shift if verse is already foregrounded
-                          if (isActive) return;
-                          
+                        if (appMode === 'control' && !isActive) {
+                          if (suppressNextVerseClickRef.current) return;
+                          const startPt = mouseDownPointRef.current;
+                          if (startPt && (Math.abs(e.clientX - startPt.x) > 5 || Math.abs(e.clientY - startPt.y) > 5)) {
+                            return;
+                          }
                           const selection = window.getSelection();
-                          if ((!selection || selection.toString().length === 0)) {
+                          if (!selection || selection.toString().length === 0) {
                             setActiveVerseIndex(index);
+                            syncStateToStorage({ index });
                           }
                         }
                       }} 
-                      onFocus={(e) => {
-                        if (appMode === 'control') {
-                          // If it's already active, we don't want to trigger a shift that might move the cursor
-                          if (isActive) return;
+                      onFocus={() => {
+                        if (appMode === 'control' && !isActive && toolbarMode !== 'poetic') {
                           setActiveVerseIndex(index);
                         }
                       }} 
@@ -4580,6 +5157,23 @@ export default function App() {
             {toolbarMode === 'poetic' && (() => {
               const steps = poeticSequenceMode === 'chiasm' ? POETIC_CHIASM_STEPS : POETIC_PARALLEL_STEPS;
               const nextStep = steps[poeticStepIndex % steps.length];
+              const isCustomActive = !POETIC_LABEL_PRESETS.includes(poeticLabelPreset as any);
+              const commitCustomLabel = () => {
+                const trimmed = customPoeticLabel.trim().toUpperCase();
+                if (!trimmed) {
+                  setShowCustomLabelInput(false);
+                  return;
+                }
+                setPoeticLabelPreset(trimmed);
+                const nextTool = { type: 'poeticLabel', value: trimmed };
+                setActiveTool(nextTool);
+                const sel = window.getSelection();
+                if (sel && !sel.isCollapsed && sel.toString().trim().length > 0) {
+                  applyMarkup(nextTool);
+                }
+                setShowCustomLabelInput(false);
+              };
+
               return (
                 <motion.div
                   key="poetic-secondary-bar"
@@ -4605,14 +5199,24 @@ export default function App() {
                     <button
                       onMouseDown={(e) => {
                         e.preventDefault();
-                        setPoeticStepIndex((poeticStepIndex + 1) % steps.length);
-                        setActiveTool({ type: 'poeticTag', value: null });
+                        const sel = window.getSelection();
+                        const hasSel = !!(sel && !sel.isCollapsed && sel.toString().trim().length > 0 && containerRef.current?.contains(sel.anchorNode));
+                        if (hasSel) {
+                          setActiveTool({ type: 'poeticTag', value: null });
+                          applyMarkup({ type: 'poeticTag', value: null });
+                        } else if (activeTool?.type !== 'poeticTag') {
+                          setActiveTool({ type: 'poeticTag', value: null });
+                        } else {
+                          setPoeticStepIndex((poeticStepIndex + 1) % steps.length);
+                        }
                       }}
-                      className="px-2 py-0.5 rounded-full text-white font-extrabold text-[11px] shadow-sm transition-transform active:scale-95"
+                      className={`px-2.5 py-0.5 rounded-full text-white font-extrabold text-[11px] shadow-sm transition-all active:scale-95 ${
+                        activeTool?.type === 'poeticTag' ? 'ring-2 ring-white/70' : ''
+                      }`}
                       style={{ backgroundColor: nextStep.color }}
-                      title="Next tag label (click to cycle)"
+                      title={activeTool?.type === 'poeticTag' ? `Armed on "${nextStep.tag}" — drag words to tag above line, or click again to skip to next` : `Arm sequence tag "${nextStep.tag}" (or apply to selection)`}
                     >
-                      Next: {nextStep.tag}
+                      Tag: {nextStep.tag}
                     </button>
                     {poeticStepIndex !== 0 && (
                       <button
@@ -4629,9 +5233,9 @@ export default function App() {
 
                   {/* Link Rail selector or pending 2-click prompt */}
                   {pendingPoeticAnchor ? (
-                    <div className="flex items-center gap-2 px-2 py-0.5 rounded-lg bg-emerald-500/15 text-emerald-500 font-semibold">
+                    <div className="flex items-center gap-2 px-2 py-0.5 rounded-lg bg-emerald-500/15 text-emerald-400 font-semibold">
                       <span className="animate-pulse">●</span>
-                      <span>Select closing phrase for {POETIC_LINK_META[pendingPoeticAnchor.type].label}</span>
+                      <span>Rail 2/2 ({POETIC_LINK_META[pendingPoeticAnchor.type].label}): Drag closing phrase</span>
                       <button
                         onMouseDown={(e) => { e.preventDefault(); cancelPendingPoeticAnchor(); }}
                         className="px-1.5 py-0.5 rounded bg-red-500/20 text-red-400 hover:bg-red-500/30 text-[10px] font-bold uppercase"
@@ -4644,6 +5248,7 @@ export default function App() {
                       <span className={`text-[10px] uppercase font-bold tracking-wider ${uiTextMuted} mr-0.5`}>Rail:</span>
                       {(['inclusio', 'parallel', 'chiasm'] as const).map(kind => {
                         const meta = POETIC_LINK_META[kind];
+                        const isArmed = activeTool?.type === 'poeticLink' && poeticLinkType === kind;
                         const isSelected = poeticLinkType === kind;
                         return (
                           <button
@@ -4651,20 +5256,29 @@ export default function App() {
                             onMouseDown={(e) => {
                               e.preventDefault();
                               setPoeticLinkType(kind);
-                              setActiveTool({ type: 'poeticLink', value: null });
+                              setActiveTool({ type: 'poeticLink', value: kind });
+                              const sel = window.getSelection();
+                              if (sel && !sel.isCollapsed && sel.toString().trim().length > 0 && containerRef.current?.contains(sel.anchorNode)) {
+                                applyPoeticAnchorStep(undefined, kind);
+                              }
                             }}
                             className={`px-2 py-0.5 rounded-lg font-bold text-[10px] uppercase tracking-wider transition-all border ${
                               isSelected
-                                ? 'text-white shadow-sm'
+                                ? isArmed
+                                  ? 'text-white shadow-sm ring-2 ring-white/50'
+                                  : 'text-white shadow-sm opacity-85'
                                 : `${uiBtnBg} ${uiTextMuted} border-transparent ${uiBtnHover}`
                             }`}
                             style={isSelected ? { backgroundColor: meta.color, borderColor: meta.color } : undefined}
-                            title={meta.hint}
+                            title={`${meta.hint} — Select opening phrase, then closing phrase`}
                           >
                             {meta.label}
                           </button>
                         );
                       })}
+                      {activeTool?.type === 'poeticLink' && (
+                        <span className="text-[10px] font-semibold text-emerald-400 ml-1">1/2: drag opening</span>
+                      )}
                     </div>
                   )}
 
@@ -4678,7 +5292,7 @@ export default function App() {
                             onMouseDown={(e) => { e.preventDefault(); removePoeticLink(lnk.id); }}
                             className="flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold text-white shrink-0 hover:opacity-80 transition-opacity"
                             style={{ backgroundColor: lnk.color }}
-                            title={`Remove ${lnk.label} link #${idx + 1}`}
+                            title={`Remove ${lnk.label} rail #${idx + 1}`}
                           >
                             <span>{lnk.label} #{idx + 1}</span>
                             <X size={10} />
@@ -4690,38 +5304,98 @@ export default function App() {
 
                   <div className={`w-px h-4 ${uiTheme === 'dark' ? 'bg-slate-700' : 'bg-slate-200'}`} />
 
-                  {/* Superscript Preset Stamps + Labels Show/Hide Toggle */}
-                  <div className="flex items-center gap-1">
-                    <span className={`text-[10px] uppercase font-bold tracking-wider ${uiTextMuted} mr-0.5`}>Sup:</span>
+                  {/* Above-Line Highlight + Label Stamps + Custom + Show/Hide Toggle */}
+                  <div className="flex items-center gap-1 flex-wrap justify-center">
+                    <span className={`text-[10px] uppercase font-bold tracking-wider ${uiTextMuted} mr-0.5`}>Label:</span>
                     {POETIC_LABEL_PRESETS.map(preset => {
-                      const isPresetActive = poeticLabelPreset === preset && activeTool?.type === 'poeticLabel';
+                      const isPresetActive = poeticLabelPreset.toLowerCase() === preset && activeTool?.type === 'poeticLabel';
+                      const isPresetSelected = poeticLabelPreset.toLowerCase() === preset;
                       return (
                         <button
                           key={preset}
                           onMouseDown={(e) => {
                             e.preventDefault();
                             setPoeticLabelPreset(preset);
+                            setShowCustomLabelInput(false);
                             const nextTool = { type: 'poeticLabel', value: preset };
                             setActiveTool(nextTool);
                             const sel = window.getSelection();
-                            if (sel && sel.toString().length > 0) {
+                            if (sel && !sel.isCollapsed && sel.toString().trim().length > 0 && containerRef.current?.contains(sel.anchorNode)) {
                               applyMarkup(nextTool);
                             }
                           }}
                           className={`px-2 py-0.5 rounded-md font-bold text-[10px] uppercase tracking-wider transition-all border ${
-                            poeticLabelPreset === preset
+                            isPresetSelected
                               ? isPresetActive
-                                ? 'shadow-sm'
+                                ? 'shadow-sm ring-1 ring-white/40'
                                 : `${uiBtnBg} ${uiText}`
                               : `${uiBtnBg} ${uiTextMuted} border-transparent ${uiBtnHover}`
                           }`}
-                          style={poeticLabelPreset === preset ? { color: activeMarkupColor, borderColor: activeMarkupColor } : undefined}
-                          title={`Stamp superscript "${preset}" in active color (applies to selected/underlined phrase)`}
+                          style={isPresetSelected ? { color: activeMarkupColor === '#000000' && uiTheme === 'dark' ? '#e2e8f0' : activeMarkupColor, borderColor: activeMarkupColor } : undefined}
+                          title={`Highlight & place "${preset.toUpperCase()}" label above phrase`}
                         >
                           {preset}
                         </button>
                       );
                     })}
+                    {isCustomActive && !showCustomLabelInput && (
+                      <button
+                        onMouseDown={(e) => {
+                          e.preventDefault();
+                          const nextTool = { type: 'poeticLabel', value: poeticLabelPreset };
+                          setActiveTool(nextTool);
+                          const sel = window.getSelection();
+                          if (sel && !sel.isCollapsed && sel.toString().trim().length > 0 && containerRef.current?.contains(sel.anchorNode)) {
+                            applyMarkup(nextTool);
+                          }
+                        }}
+                        className="px-2 py-0.5 rounded-md font-bold text-[10px] uppercase tracking-wider transition-all border shadow-sm ring-1 ring-white/40"
+                        style={{ color: activeMarkupColor === '#000000' && uiTheme === 'dark' ? '#e2e8f0' : activeMarkupColor, borderColor: activeMarkupColor }}
+                        title={`Highlight & place "${poeticLabelPreset}" label above phrase`}
+                      >
+                        {poeticLabelPreset}
+                      </button>
+                    )}
+                    {showCustomLabelInput ? (
+                      <form
+                        onSubmit={(e) => {
+                          e.preventDefault();
+                          commitCustomLabel();
+                        }}
+                        className="inline-flex items-center gap-1"
+                      >
+                        <input
+                          type="text"
+                          value={customPoeticLabel}
+                          onChange={(e) => setCustomPoeticLabel(e.target.value)}
+                          onKeyDown={(e) => {
+                            e.stopPropagation();
+                            if (e.key === 'Escape') setShowCustomLabelInput(false);
+                          }}
+                          placeholder="Custom..."
+                          maxLength={18}
+                          autoFocus
+                          className={`w-24 px-1.5 py-0.5 rounded text-[10px] font-bold uppercase outline-none border ${uiBorder} ${uiTheme === 'dark' ? 'bg-slate-900 text-white' : 'bg-white text-slate-900'}`}
+                        />
+                        <button
+                          type="submit"
+                          className="px-1.5 py-0.5 rounded bg-emerald-500 text-slate-950 font-bold text-[10px] uppercase"
+                        >
+                          Set
+                        </button>
+                      </form>
+                    ) : (
+                      <button
+                        onMouseDown={(e) => {
+                          e.preventDefault();
+                          setShowCustomLabelInput(true);
+                        }}
+                        className={`px-2 py-0.5 rounded-md font-bold text-[10px] uppercase tracking-wider ${uiBtnBg} ${uiTextMuted} ${uiBtnHover} transition-colors`}
+                        title="Enter custom above-line label"
+                      >
+                        + Custom
+                      </button>
+                    )}
                     <button
                       onMouseDown={(e) => {
                         e.preventDefault();
@@ -4735,7 +5409,7 @@ export default function App() {
                           ? `${uiBtnBg} text-emerald-500`
                           : `${uiBtnBg} ${uiTextMuted}`
                       }`}
-                      title={settings.showPoeticLabels !== false ? 'Hide Superscription Labels Live' : 'Show Superscription Labels Live'}
+                      title={settings.showPoeticLabels !== false ? 'Hide Above-Line Labels Live' : 'Show Above-Line Labels Live'}
                     >
                       {settings.showPoeticLabels !== false ? <Eye size={11} /> : <EyeOff size={11} />}
                       <span>Labels</span>
@@ -4791,6 +5465,9 @@ export default function App() {
                   onMouseDown={(e) => {
                     e.preventDefault();
                     setToolbarMode('study');
+                    if (activeTool?.type.startsWith('poetic')) {
+                      setActiveTool(null);
+                    }
                   }}
                   className={`flex items-center gap-1.5 px-2.5 py-2 rounded-lg text-xs font-bold transition-all ${
                     toolbarMode === 'study'
@@ -4806,6 +5483,10 @@ export default function App() {
                   onMouseDown={(e) => {
                     e.preventDefault();
                     setToolbarMode('poetic');
+                    const poeticTypes = ['underlineWavy', 'underlineDouble', 'underlineDashed', 'poeticTag', 'poeticLabel', 'poeticLink', 'eraser'];
+                    if (!activeTool || !poeticTypes.includes(activeTool.type)) {
+                      setActiveTool({ type: 'poeticLabel', value: poeticLabelPreset });
+                    }
                   }}
                   className={`flex items-center gap-1.5 px-2.5 py-2 rounded-lg text-xs font-bold transition-all ${
                     toolbarMode === 'poetic'
@@ -4903,14 +5584,14 @@ export default function App() {
                     <button
                       onMouseDown={(e) => { e.preventDefault(); toggleTool('poeticLabel', poeticLabelPreset); }}
                       className={`p-3 rounded-xl transition-all relative ${activeTool?.type === 'poeticLabel' ? 'bg-emerald-500 text-slate-950 shadow-lg shadow-emerald-500/20' : `${uiTextMuted} ${uiBtnHover} hover:text-emerald-500`}`}
-                      title={`Stamp Superscription Label ("${poeticLabelPreset}" in active color)`}
+                      title={`Highlight & Above-Line Label ("${poeticLabelPreset.toUpperCase()}" in active color)`}
                     >
-                      <Superscript size={18} />
+                      <Tag size={18} />
                     </button>
                     <button
-                      onMouseDown={(e) => { e.preventDefault(); toggleTool('poeticLink'); }}
+                      onMouseDown={(e) => { e.preventDefault(); toggleTool('poeticLink', poeticLinkType); }}
                       className={`p-3 rounded-xl transition-all ${activeTool?.type === 'poeticLink' || pendingPoeticAnchor ? 'bg-emerald-500 text-slate-950 shadow-lg shadow-emerald-500/20' : `${uiTextMuted} ${uiBtnHover} hover:text-emerald-500`}`}
-                      title={`2-Click Margin Connector (${POETIC_LINK_META[poeticLinkType].label})`}
+                      title={`2-Step Margin Rail Connector (${POETIC_LINK_META[poeticLinkType].label})`}
                     >
                       <GitCompareArrows size={18} />
                     </button>
@@ -4918,7 +5599,7 @@ export default function App() {
                     <button
                       onMouseDown={(e) => { e.preventDefault(); toggleActiveVerseIndent(); }}
                       className={`p-3 rounded-xl transition-all relative ${indentLvl > 0 ? 'bg-teal-500/20 text-teal-400 ring-1 ring-teal-500/40' : `${uiTextMuted} ${uiBtnHover} hover:text-teal-400`}`}
-                      title="Cycle Line Indentation on Active Verse (0 → 1 → 2)"
+                      title="Cycle Line Indentation on Selected / Active Verse (0 → 1 → 2)"
                     >
                       <ListIndentIncrease size={18} />
                       {indentLvl > 0 && (
@@ -4928,7 +5609,7 @@ export default function App() {
                     <button
                       onMouseDown={(e) => { e.preventDefault(); toggleActiveVerseStanzaBreak(); }}
                       className={`p-3 rounded-xl transition-all ${hasStanzaBreak ? 'bg-teal-500/20 text-teal-400 ring-1 ring-teal-500/40' : `${uiTextMuted} ${uiBtnHover} hover:text-teal-400`}`}
-                      title="Toggle Stanza / Strophe Break Above Active Verse"
+                      title="Toggle Stanza / Strophe Break Above Selected / Active Verse"
                     >
                       <SeparatorHorizontal size={18} />
                     </button>

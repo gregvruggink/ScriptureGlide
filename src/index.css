@@ -35,77 +35,35 @@
   scrollbar-width: none;
 }
 
-.verse-poetic-tag {
+.verse-poetic-tag,
+.verse-poetic-label {
   position: relative;
   display: inline;
-  padding: 0 3px;
+  padding: 1px 4px;
   border-radius: 4px;
   box-decoration-break: clone;
   -webkit-box-decoration-break: clone;
 }
 
-.verse-poetic-tag::after {
-  content: attr(data-glide-tag);
-  display: inline-block;
-  vertical-align: super;
-  font-size: 0.48em;
-  line-height: 0;
-  font-weight: 800;
-  font-family: var(--font-sans);
-  letter-spacing: 0.04em;
-  padding: 5px 5px;
-  margin-inline-start: 3px;
-  border-radius: 999px;
-  background-color: var(--glide-tag-color, #0d9488);
-  color: #ffffff;
-  user-select: none;
-}
-
-.verse-poetic-anchor {
-  border-bottom: 2px solid var(--glide-anchor-color, #10b981);
-  border-radius: 3px;
-  padding: 0 2px;
-  box-decoration-break: clone;
-  -webkit-box-decoration-break: clone;
-}
-
-.verse-poetic-anchor::after {
-  content: attr(data-glide-anchor-label);
-  display: inline-block;
-  vertical-align: super;
-  font-size: 0.42em;
-  line-height: 0;
-  font-weight: 800;
-  font-family: var(--font-sans);
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  margin-inline-start: 4px;
-  color: var(--glide-anchor-color, #10b981);
-  user-select: none;
+.verse-poetic-tag {
+  background-color: color-mix(in srgb, var(--glide-tag-color, #0d9488) 24%, transparent);
+  border-bottom: 2px solid var(--glide-tag-color, #0d9488);
 }
 
 .verse-poetic-label {
+  background-color: color-mix(in srgb, var(--glide-label-color, #10b981) 24%, transparent);
+  border-bottom: 2px solid var(--glide-label-color, #10b981);
+}
+
+.verse-poetic-anchor {
+  position: relative;
   display: inline;
-}
-
-.verse-poetic-label::after {
-  content: attr(data-glide-label);
-  display: inline-block;
-  vertical-align: super;
-  font-size: 0.42em;
-  line-height: 0;
-  font-weight: 800;
-  font-family: var(--font-sans);
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  margin-inline-start: 3px;
-  color: var(--glide-label-color, #10b981);
-  user-select: none;
-}
-
-.hide-poetic-labels .verse-poetic-anchor::after,
-.hide-poetic-labels .verse-poetic-label::after {
-  display: none;
+  background-color: color-mix(in srgb, var(--glide-anchor-color, #10b981) 14%, transparent);
+  border-bottom: 2px solid var(--glide-anchor-color, #10b981);
+  border-radius: 3px;
+  padding: 1px 3px;
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
 }
 
 @media print {
