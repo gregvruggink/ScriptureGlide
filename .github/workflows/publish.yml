@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - main
+      - beta
 
 jobs:
   publish:
@@ -42,10 +43,10 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
-          tagName: app-v__VERSION__
-          releaseName: "ScriptureGlide v__VERSION__"
-          releaseBody: "Automated release from GitHub Actions."
+          tagName: ${{ github.ref_name == 'beta' && 'beta-v__VERSION__' || 'app-v__VERSION__' }}
+          releaseName: ${{ github.ref_name == 'beta' && 'ScriptureGlide v__VERSION__ (Beta)' || 'ScriptureGlide v__VERSION__' }}
+          releaseBody: ${{ github.ref_name == 'beta' && 'Automated beta build from GitHub Actions.' || 'Automated release from GitHub Actions.' }}
           releaseDraft: true
-          prerelease: false
+          prerelease: ${{ github.ref_name == 'beta' }}
           # Use the universal target for macOS builds
           args: ${{ matrix.platform == 'macos-latest' && '--target universal-apple-darwin' || '' }}
