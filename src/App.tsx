@@ -2215,7 +2215,7 @@ export default function App() {
       font-weight: 700;
       cursor: pointer;
     }
-    .page-wrap { max-width: 780px; margin: 0 auto; }
+    .page-wrap { max-width: 688px; margin: 0 auto; }
     .passage-section { margin-bottom: 36px; }
     .passage-header {
       border-bottom: 2px solid ${borderColor};
@@ -2307,15 +2307,21 @@ export default function App() {
             var curTop = r0.top - wRect.top - 14;
             var hitSameLine = placed.find(function(p){ return Math.abs(p.top - curTop) < 12 && !(right + 3 < p.left || left - 3 > p.right); });
             if (hitSameLine && !el.classList.contains('pill-align-right')) {
-              var shiftX = (hitSameLine.right + 5) - left;
-              if (shiftX > 0 && shiftX <= 54 && (left + shiftX + estW) <= wRect.width - 4) {
-                var shiftedLeft = left + shiftX;
-                var shiftedRight = right + shiftX;
-                var stillHit = placed.some(function(p){ return Math.abs(p.top - curTop) < 12 && !(shiftedRight + 3 < p.left || shiftedLeft - 3 > p.right); });
-                if (!stillHit) {
-                  el.style.setProperty('--pill-x', Math.round(shiftX) + 'px');
-                  left = shiftedLeft;
-                  right = shiftedRight;
+              var shiftRight = (hitSameLine.right + 5) - left;
+              var shiftLeft = (hitSameLine.left - 5) - right;
+              var tryShifts = wrap.getAttribute('data-rtl') === '1' ? [shiftLeft, shiftRight] : [shiftRight, shiftLeft];
+              for (var si = 0; si < tryShifts.length; si++) {
+                var sx = tryShifts[si];
+                if (Math.abs(sx) > 0 && Math.abs(sx) <= 72 && (left + sx) >= 4 && (left + sx + estW) <= wRect.width - 4) {
+                  var sLeft = left + sx;
+                  var sRight = right + sx;
+                  var stillHit = placed.some(function(p){ return Math.abs(p.top - curTop) < 12 && !(sRight + 3 < p.left || sLeft - 3 > p.right); });
+                  if (!stillHit) {
+                    el.style.setProperty('--pill-x', Math.round(sx) + 'px');
+                    left = sLeft;
+                    right = sRight;
+                    break;
+                  }
                 }
               }
             }
@@ -2424,6 +2430,10 @@ export default function App() {
       window.addEventListener('load', drawExportRails);
       window.addEventListener('resize', drawExportRails);
       window.addEventListener('beforeprint', drawExportRails);
+      if (window.matchMedia) {
+        var printMq = window.matchMedia('print');
+        if (printMq.addEventListener) printMq.addEventListener('change', function(e){ if (e.matches) drawExportRails(); });
+      }
       if (document.fonts && document.fonts.ready) document.fonts.ready.then(drawExportRails);
       setTimeout(drawExportRails, 60);
     })();
