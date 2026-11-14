@@ -382,6 +382,42 @@ const MemoVerseHtml = React.memo(({
   return <span {...spanProps} dangerouslySetInnerHTML={htmlObj} />;
 });
 
+const countPoeticLanes = (links: PoeticLink[], versesList: Verse[]): number => {
+  if (!links || links.length === 0) return 0;
+  const anchorVerse = new Map<string, number>();
+  versesList.forEach((v, idx) => {
+    const html = v.html || '';
+    if (!html.includes('data-glide-anchor=')) return;
+    for (const m of html.matchAll(/data-glide-anchor="([^"]+)"/g)) {
+      anchorVerse.set(m[1], idx);
+    }
+  });
+  const spans: { top: number; bot: number }[] = [];
+  for (const lnk of links) {
+    const a = anchorVerse.get(lnk.fromAnchorId);
+    const b = anchorVerse.get(lnk.toAnchorId);
+    if (a === undefined || b === undefined) continue;
+    spans.push({ top: Math.min(a, b), bot: Math.max(a, b) });
+  }
+  if (spans.length === 0) return 1;
+  spans.sort((x, y) => (x.bot - x.top) - (y.bot - y.top));
+  const lanes: { top: number; bot: number }[][] = [];
+  for (const sp of spans) {
+    let laneIdx = 0;
+    while (true) {
+      const existing = lanes[laneIdx] || [];
+      const overlaps = existing.some(e => !(sp.bot < e.top || sp.top > e.bot));
+      if (!overlaps) {
+        existing.push(sp);
+        lanes[laneIdx] = existing;
+        break;
+      }
+      laneIdx++;
+    }
+  }
+  return Math.max(1, lanes.length);
+};
+
 interface ComputedPoeticArc {
   link: PoeticLink;
   topY: number;
@@ -419,6 +455,7 @@ const PoeticGutterOverlay: React.FC<{
     verseIndex: number;
     type: 'inclusio' | 'parallel' | 'chiasm';
     color: string;
+    label?: string;
   } | null;
   activeVerseIndex: number;
   verseCount: number;
@@ -513,9 +550,12 @@ const PoeticGutterOverlay: React.FC<{
           laneIdx++;
         }
 
-        const offset = 28 + laneIdx * 34;
+        const dispLbl = (item.link.label || '').slice(0, 15);
+        const estBadgeW = Math.max(40, Math.round(dispLbl.length * 5.8 + 12));
+        const halfBadge = Math.round(estBadgeW / 2);
+        const offset = Math.max(34, halfBadge + 8) + laneIdx * 48;
         const rawRailX = isRtl ? textEdgeX + offset : textEdgeX - offset;
-        const railX = Math.max(24, Math.min(wRect.width - 24, rawRailX));
+        const railX = Math.max(halfBadge + 4, Math.min(wRect.width - halfBadge - 4, rawRailX));
         computedArcs.push({
           link: item.link,
           topY: item.topY,
@@ -533,14 +573,15 @@ const PoeticGutterOverlay: React.FC<{
         if (pEl) {
           const r = pEl.getClientRects()[0] || pEl.getBoundingClientRect();
           const y = r.top - wRect.top + r.height / 2;
-          const rawStubX = isRtl ? textEdgeX + 34 : textEdgeX - 34;
-          const stubX = Math.max(28, Math.min(wRect.width - 28, rawStubX));
+          const rawStubX = isRtl ? textEdgeX + 38 : textEdgeX - 38;
+          const stubX = Math.max(32, Math.min(wRect.width - 32, rawStubX));
+          const stubTitle = (pendingPoeticAnchor.label || POETIC_LINK_META[pendingPoeticAnchor.type].label).slice(0, 8);
           nextStub = {
             y,
             edgeX: textEdgeX,
             stubX,
             color: pendingPoeticAnchor.color,
-            label: `${POETIC_LINK_META[pendingPoeticAnchor.type].label.slice(0, 6)} 1/2`
+            label: `${stubTitle} 1/2`
           };
         }
       }
@@ -708,8 +749,8 @@ const PoeticGutterOverlay: React.FC<{
             const opacity = active ? 0.94 : 0.45;
             const labelX = railX;
             const textColor = getContrastTextColor(link.color);
-            const displayLabel = (link.label || '').slice(0, 8);
-            const badgeW = Math.max(40, Math.round(displayLabel.length * 6.2 + 12));
+            const displayLabel = (link.label || '').slice(0, 15);
+            const badgeW = Math.max(40, Math.round(displayLabel.length * 5.8 + 12));
 
             return (
               <g key={link.id} style={{ opacity, transition: 'opacity 300ms ease' }}>
@@ -1310,11 +1351,15 @@ export default function App() {
   const [poeticSequenceMode, setPoeticSequenceMode] = useState<'chiasm' | 'parallel'>('chiasm');
   const [poeticStepIndex, setPoeticStepIndex] = useState(0);
   const [poeticLinkType, setPoeticLinkType] = useState<'inclusio' | 'parallel' | 'chiasm'>('inclusio');
+  const [activeCustomRailLabel, setActiveCustomRailLabel] = useState<string | null>(null);
+  const [customRailLabel, setCustomRailLabel] = useState('');
+  const [showCustomRailInput, setShowCustomRailInput] = useState(false);
   const [pendingPoeticAnchor, setPendingPoeticAnchor] = useState<{
     anchorId: string;
     verseIndex: number;
     type: 'inclusio' | 'parallel' | 'chiasm';
     color: string;
+    label?: string;
   } | null>(null);
   const [poeticLabelPreset, setPoeticLabelPreset] = useState<string>('inclusio');
   const [customPoeticLabel, setCustomPoeticLabel] = useState('');
@@ -2071,29 +2116,40 @@ export default function App() {
     const sectionsHtml = snapshot.sessions.map((session, sIdx) => {
       const isRtl = session.translation === 'wlc';
       const links = session.poeticLinks || [];
-      const gutterPx = links.length > 0 ? Math.min(224, 88 + Math.max(0, links.length - 1) * 34) : 0;
+      const laneCount = countPoeticLanes(links, session.verses);
+      const gutterPx = laneCount > 0 ? Math.min(248, 104 + Math.max(0, laneCount - 1) * 48) : 0;
       const contentPadStyle = gutterPx > 0 ? (isRtl ? ` style="padding-right:${gutterPx}px;"` : ` style="padding-left:${gutterPx}px;"`) : '';
-      const versesHtml = session.verses.map((v, vIdx) => {
+      const stanzaGroups: string[][] = [[]];
+      session.verses.forEach((v, vIdx) => {
         const vNum = getExportPassageNumber(v, vIdx);
         const vLayout = session.verseLayout?.[v.id];
         const indentLevel = vLayout?.indent || 0;
         const stanzaBreak = !!vLayout?.stanzaBreakBefore;
+        if (vIdx > 0 && (stanzaBreak || v.isNewPassage || v.isNewChapter)) {
+          stanzaGroups.push([]);
+        }
         const bookHeaderHtml = (v.bookHeader && settings.showBookHeader !== false)
           ? `<div class="book-header">${escapeHtmlAttr(v.bookHeader)}</div>`
           : '';
         const dividerHtml = (v.isNewPassage || v.isNewChapter) ? `<div class="chapter-break"></div>` : '';
-        const stanzaHtml = stanzaBreak ? `<div class="stanza-break"></div>` : '';
+        const stanzaHtml = (vIdx > 0 && stanzaBreak) ? `<div class="stanza-break"></div>` : '';
         const acrosticHtml = v.acrostic ? `<div class="acrostic">${escapeHtmlAttr(v.acrostic)}</div>` : '';
         const numSpan = snapshot.showVerseNumbers
           ? `<span class="verse-num" style="color: ${escapeHtmlAttr(settings.verseNumberColor || '#d97706')};">${escapeHtmlAttr(vNum)}</span>`
           : '';
         const contentHtml = (v.html || escapeHtmlAttr(v.text)).replace(/\u200E/g, '');
         const indentStyle = indentLevel > 0 ? ` style="padding-inline-start: ${indentLevel * 2.2}em;"` : '';
+        const curGroup = stanzaGroups[stanzaGroups.length - 1];
         if (snapshot.oneVersePerLine || v.isNewChapter || v.acrostic || indentLevel > 0 || stanzaBreak) {
-          return `${bookHeaderHtml}${dividerHtml}${stanzaHtml}<div class="verse-block"${indentStyle}>${acrosticHtml}<div class="verse-row">${numSpan}<span class="verse-body" dir="auto">${contentHtml}</span></div></div>`;
+          curGroup.push(`${bookHeaderHtml}${dividerHtml}${stanzaHtml}<div class="verse-block"${indentStyle}>${acrosticHtml}<div class="verse-row">${numSpan}<span class="verse-body" dir="auto">${contentHtml}</span></div></div>`);
+        } else {
+          curGroup.push(`${bookHeaderHtml}${dividerHtml}<span class="verse-inline">${numSpan}<span class="verse-body" dir="auto">${contentHtml}</span> </span>`);
         }
-        return `${bookHeaderHtml}${dividerHtml}<span class="verse-inline">${numSpan}<span class="verse-body" dir="auto">${contentHtml}</span> </span>`;
-      }).join('');
+      });
+      const versesHtml = stanzaGroups
+        .filter(g => g.length > 0)
+        .map(g => `<div class="stanza-group"${contentPadStyle}>${g.join('')}</div>`)
+        .join('');
 
       return `
         <section class="passage-section${sIdx > 0 ? ' page-break' : ''}" dir="${isRtl ? 'rtl' : 'ltr'}">
@@ -2101,7 +2157,7 @@ export default function App() {
             <div class="passage-title">${escapeHtmlAttr(session.name)}</div>
             <div class="passage-meta">${escapeHtmlAttr(session.translation.toUpperCase())} • ${session.verses.length} verse${session.verses.length === 1 ? '' : 's'}</div>
           </header>
-          <div class="passage-content" data-links="${escapeHtmlAttr(JSON.stringify(links))}" data-rtl="${isRtl ? '1' : '0'}"${contentPadStyle}>${versesHtml}</div>
+          <div class="passage-content" data-links="${escapeHtmlAttr(JSON.stringify(links))}" data-rtl="${isRtl ? '1' : '0'}" data-gutter="${gutterPx}">${versesHtml}</div>
         </section>`;
     }).join('\n');
 
@@ -2173,12 +2229,13 @@ export default function App() {
     }
     .passage-title { font-size: 20px; font-weight: 800; }
     .passage-meta { font-size: 11px; text-transform: uppercase; letter-spacing: 0.12em; color: ${mutedColor}; font-weight: 700; }
-    .passage-content { position: relative; padding-top: 18px; font-size: ${baseFontSize}px; line-height: ${Math.max(settings.textSpacing, 2.2)}; }
-    .book-header { font-size: 24px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.18em; opacity: 0.45; margin: 18px 0 10px; text-align: center; }
-    .chapter-break { height: 14px; }
-    .stanza-break { height: 16px; }
+    .passage-content { position: relative; padding-top: 8px; font-size: ${baseFontSize}px; line-height: ${Math.max(settings.textSpacing, 2.14)}; }
+    .stanza-group { position: relative; break-inside: avoid; page-break-inside: avoid; }
+    .book-header { font-size: 20px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.18em; opacity: 0.45; margin: 10px 0 6px; text-align: center; }
+    .chapter-break { height: 10px; }
+    .stanza-break { height: 10px; }
     .acrostic { font-size: 0.7em; text-transform: uppercase; letter-spacing: 0.25em; opacity: 0.55; margin-bottom: 4px; font-style: italic; }
-    .verse-block { margin-bottom: 0; padding-top: 18px; break-inside: avoid; page-break-inside: avoid; }
+    .verse-block { margin-bottom: 0; padding-top: 14px; break-inside: avoid; page-break-inside: avoid; }
     .verse-row { display: flex; gap: 10px; align-items: baseline; }
     .verse-inline { display: inline; }
     .verse-num { font-size: 0.72em; font-weight: 700; margin-inline-end: 5px; vertical-align: super; opacity: 0.85; }
@@ -2186,16 +2243,18 @@ export default function App() {
     .verse-poetic-tag, .verse-poetic-label { position: relative; display: inline; padding: 1px 4px; border-radius: 4px; box-decoration-break: clone; -webkit-box-decoration-break: clone; }
     .verse-poetic-tag { background-color: color-mix(in srgb, var(--glide-tag-color, #0d9488) 24%, transparent); border-bottom: 2px solid var(--glide-tag-color, #0d9488); }
     .verse-poetic-label { background-color: color-mix(in srgb, var(--glide-label-color, #10b981) 24%, transparent); border-bottom: 2px solid var(--glide-label-color, #10b981); }
-    .verse-poetic-tag::before { content: attr(data-glide-tag); position: absolute; bottom: calc(100% + 2px + var(--pill-y, 0px)); left: 0; white-space: nowrap; font-size: 9px; line-height: 1.25; font-weight: 800; font-family: var(--font-sans); letter-spacing: 0.05em; padding: 1px 6px; border-radius: 999px; background-color: var(--glide-tag-color, #0d9488); color: #ffffff; }
-    .verse-poetic-label::before { content: attr(data-glide-label); position: absolute; bottom: calc(100% + 2px + var(--pill-y, 0px)); left: 0; white-space: nowrap; font-size: 9px; line-height: 1.25; font-weight: 800; font-family: var(--font-sans); text-transform: uppercase; letter-spacing: 0.06em; padding: 1px 6px; border-radius: 999px; background-color: var(--glide-label-color, #10b981); color: #ffffff; }
+    .verse-poetic-tag::before { content: attr(data-glide-tag); position: absolute; bottom: calc(100% + 2px + var(--pill-y, 0px)); left: var(--pill-x, 0px); white-space: nowrap; font-size: 9px; line-height: 1.25; font-weight: 800; font-family: var(--font-sans); letter-spacing: 0.05em; padding: 1px 6px; border-radius: 999px; background-color: var(--glide-tag-color, #0d9488); color: #ffffff; }
+    .verse-poetic-label::before { content: attr(data-glide-label); position: absolute; bottom: calc(100% + 2px + var(--pill-y, 0px)); left: var(--pill-x, 0px); white-space: nowrap; font-size: 9px; line-height: 1.25; font-weight: 800; font-family: var(--font-sans); text-transform: uppercase; letter-spacing: 0.06em; padding: 1px 6px; border-radius: 999px; background-color: var(--glide-label-color, #10b981); color: #ffffff; }
     .pill-align-right::before { left: auto; right: 0; }
     .verse-poetic-anchor { background-color: color-mix(in srgb, var(--glide-anchor-color, #10b981) 14%, transparent); border-bottom: 2px solid var(--glide-anchor-color, #10b981); border-radius: 3px; padding: 1px 3px; box-decoration-break: clone; -webkit-box-decoration-break: clone; }
     .hide-poetic-labels .verse-poetic-tag::before, .hide-poetic-labels .verse-poetic-label::before { display: none; }
     .export-rail-svg { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; pointer-events: none; }
     @media print {
-      @page { margin: 0.6in; }
+      @page { margin: 0.5in 0.55in; }
       body { padding: 0; }
       .no-print { display: none !important; }
+      .book-header { display: none !important; }
+      .passage-header { margin-bottom: 10px; padding-bottom: 6px; }
       .page-break { break-before: page; page-break-before: always; }
     }
   </style>
@@ -2226,6 +2285,7 @@ export default function App() {
           els.forEach(function(el){
             el.classList.remove('pill-align-right');
             el.style.removeProperty('--pill-y');
+            el.style.removeProperty('--pill-x');
           });
           var placed = [];
           els.forEach(function(el){
@@ -2245,6 +2305,20 @@ export default function App() {
             }
             var lift = 0;
             var curTop = r0.top - wRect.top - 14;
+            var hitSameLine = placed.find(function(p){ return Math.abs(p.top - curTop) < 12 && !(right + 3 < p.left || left - 3 > p.right); });
+            if (hitSameLine && !el.classList.contains('pill-align-right')) {
+              var shiftX = (hitSameLine.right + 5) - left;
+              if (shiftX > 0 && shiftX <= 54 && (left + shiftX + estW) <= wRect.width - 4) {
+                var shiftedLeft = left + shiftX;
+                var shiftedRight = right + shiftX;
+                var stillHit = placed.some(function(p){ return Math.abs(p.top - curTop) < 12 && !(shiftedRight + 3 < p.left || shiftedLeft - 3 > p.right); });
+                if (!stillHit) {
+                  el.style.setProperty('--pill-x', Math.round(shiftX) + 'px');
+                  left = shiftedLeft;
+                  right = shiftedRight;
+                }
+              }
+            }
             for (var step = 0; step < 3; step++) {
               var hit = placed.some(function(p){ return Math.abs(p.top - curTop) < 12 && !(right + 3 < p.left || left - 3 > p.right); });
               if (!hit) break;
@@ -2256,84 +2330,95 @@ export default function App() {
           });
         });
       }
+      function renderRailsIntoHost(host, items, isRtl, gutterPx){
+        var wRect = host.getBoundingClientRect();
+        if (!wRect.width || !items.length) return;
+        var cs = getComputedStyle(host);
+        var sidePad = parseFloat(isRtl ? cs.paddingRight : cs.paddingLeft) || gutterPx || 0;
+        var edgeX = sidePad >= 48 ? (isRtl ? wRect.width - sidePad + 8 : sidePad - 8) : (isRtl ? wRect.width - 8 : 8);
+        items.sort(function(a, b){ return (a.botY - a.topY) - (b.botY - b.topY); });
+        var lanes = [];
+        var ns = 'http://www.w3.org/2000/svg';
+        var svg = document.createElementNS(ns, 'svg');
+        svg.setAttribute('class', 'export-rail-svg');
+        items.forEach(function(it){
+          var lane = 0;
+          while (true) {
+            var ex = lanes[lane] || [];
+            var hit = ex.some(function(e){ return !(it.botY + 8 < e.topY || it.topY - 8 > e.botY); });
+            if (!hit) { ex.push({ topY: it.topY, botY: it.botY }); lanes[lane] = ex; break; }
+            lane++;
+          }
+          var lblText = (it.lnk.label || '').slice(0, 15);
+          var badgeW = Math.max(40, Math.round(lblText.length * 5.8 + 12));
+          var halfB = Math.round(badgeW / 2);
+          var off = Math.max(34, halfB + 8) + lane * 48;
+          var rx = Math.max(halfB + 4, Math.min(wRect.width - halfB - 4, isRtl ? edgeX + off : edgeX - off));
+          var dir = isRtl ? 1 : -1;
+          var spanH = Math.abs(it.botY - it.topY);
+          var effTop = spanH < 10 ? (it.topY + it.botY) / 2 - 7 : it.topY;
+          var effBot = spanH < 10 ? (it.topY + it.botY) / 2 + 7 : it.botY;
+          var r = Math.min(10, Math.abs(effBot - effTop) / 2);
+          var midY = (effTop + effBot) / 2;
+          var d = 'M ' + edgeX + ' ' + it.topY + ' L ' + (rx - dir * r) + ' ' + effTop + ' Q ' + rx + ' ' + effTop + ' ' + rx + ' ' + (effTop + r) + ' L ' + rx + ' ' + (effBot - r) + ' Q ' + rx + ' ' + effBot + ' ' + (rx - dir * r) + ' ' + effBot + ' L ' + edgeX + ' ' + it.botY;
+          var path = document.createElementNS(ns, 'path');
+          path.setAttribute('d', d);
+          path.setAttribute('fill', 'none');
+          path.setAttribute('stroke', it.lnk.color);
+          path.setAttribute('stroke-width', '2.5');
+          path.setAttribute('stroke-linecap', 'round');
+          if (it.lnk.type === 'parallel') path.setAttribute('stroke-dasharray', '6 4');
+          svg.appendChild(path);
+          [it.topY, it.botY].forEach(function(cy){
+            var c = document.createElementNS(ns, 'circle');
+            c.setAttribute('cx', String(edgeX)); c.setAttribute('cy', String(cy)); c.setAttribute('r', '3.5');
+            c.setAttribute('fill', it.lnk.color);
+            svg.appendChild(c);
+          });
+          var g = document.createElementNS(ns, 'g');
+          g.setAttribute('transform', 'translate(' + rx + ',' + midY + ')');
+          var rect = document.createElementNS(ns, 'rect');
+          rect.setAttribute('x', String(-badgeW / 2)); rect.setAttribute('y', '-9.5'); rect.setAttribute('width', String(badgeW)); rect.setAttribute('height', '19'); rect.setAttribute('rx', '9.5');
+          rect.setAttribute('fill', it.lnk.color);
+          var txt = document.createElementNS(ns, 'text');
+          txt.setAttribute('x', '0'); txt.setAttribute('y', '3.5'); txt.setAttribute('text-anchor', 'middle');
+          txt.setAttribute('fill', contrastText(it.lnk.color)); txt.setAttribute('font-size', '8.5'); txt.setAttribute('font-weight', '800');
+          txt.setAttribute('font-family', 'Inter, sans-serif');
+          txt.style.textTransform = 'uppercase'; txt.style.letterSpacing = '0.06em';
+          txt.textContent = lblText;
+          g.appendChild(rect); g.appendChild(txt); svg.appendChild(g);
+        });
+        host.insertBefore(svg, host.firstChild);
+      }
       function drawExportRails(){
         layoutExportPills();
         document.querySelectorAll('.passage-content[data-links]').forEach(function(wrap){
-          var oldSvg = wrap.querySelector('.export-rail-svg');
-          if (oldSvg) oldSvg.remove();
+          wrap.querySelectorAll('.export-rail-svg').forEach(function(s){ s.remove(); });
           var links = [];
           try { links = JSON.parse(wrap.getAttribute('data-links') || '[]'); } catch(e) {}
           if (!links.length) return;
           var isRtl = wrap.getAttribute('data-rtl') === '1';
-          var wRect = wrap.getBoundingClientRect();
-          if (!wRect.width) return;
-          var cs = getComputedStyle(wrap);
-          var sidePad = parseFloat(isRtl ? cs.paddingRight : cs.paddingLeft) || 0;
-          var edgeX = sidePad >= 48 ? (isRtl ? wRect.width - sidePad + 8 : sidePad - 8) : (isRtl ? wRect.width - 8 : 8);
-          var items = [];
+          var gutterPx = parseFloat(wrap.getAttribute('data-gutter') || '0') || 0;
+          var hostMap = new Map();
           links.forEach(function(lnk){
             var a = wrap.querySelector('[data-glide-anchor="' + lnk.fromAnchorId + '"]');
             var b = wrap.querySelector('[data-glide-anchor="' + lnk.toAnchorId + '"]');
             if (!a || !b) return;
+            var sgA = a.closest('.stanza-group');
+            var sgB = b.closest('.stanza-group');
+            var host = (sgA && sgA === sgB) ? sgA : wrap;
+            var hRect = host.getBoundingClientRect();
+            if (!hRect.width) return;
             var r1 = a.getClientRects()[0] || a.getBoundingClientRect();
             var r2 = b.getClientRects()[0] || b.getBoundingClientRect();
-            var y1 = r1.top - wRect.top + r1.height / 2;
-            var y2 = r2.top - wRect.top + r2.height / 2;
-            items.push({ lnk: lnk, topY: Math.min(y1, y2), botY: Math.max(y1, y2) });
+            var y1 = r1.top - hRect.top + r1.height / 2;
+            var y2 = r2.top - hRect.top + r2.height / 2;
+            if (!hostMap.has(host)) hostMap.set(host, []);
+            hostMap.get(host).push({ lnk: lnk, topY: Math.min(y1, y2), botY: Math.max(y1, y2) });
           });
-          if (!items.length) return;
-          items.sort(function(a, b){ return (a.botY - a.topY) - (b.botY - b.topY); });
-          var lanes = [];
-          var ns = 'http://www.w3.org/2000/svg';
-          var svg = document.createElementNS(ns, 'svg');
-          svg.setAttribute('class', 'export-rail-svg');
-          items.forEach(function(it){
-            var lane = 0;
-            while (true) {
-              var ex = lanes[lane] || [];
-              var hit = ex.some(function(e){ return !(it.botY + 8 < e.topY || it.topY - 8 > e.botY); });
-              if (!hit) { ex.push({ topY: it.topY, botY: it.botY }); lanes[lane] = ex; break; }
-              lane++;
-            }
-            var off = 28 + lane * 34;
-            var rx = Math.max(24, Math.min(wRect.width - 24, isRtl ? edgeX + off : edgeX - off));
-            var dir = isRtl ? 1 : -1;
-            var spanH = Math.abs(it.botY - it.topY);
-            var effTop = spanH < 10 ? (it.topY + it.botY) / 2 - 7 : it.topY;
-            var effBot = spanH < 10 ? (it.topY + it.botY) / 2 + 7 : it.botY;
-            var r = Math.min(10, Math.abs(effBot - effTop) / 2);
-            var midY = (effTop + effBot) / 2;
-            var d = 'M ' + edgeX + ' ' + it.topY + ' L ' + (rx - dir * r) + ' ' + effTop + ' Q ' + rx + ' ' + effTop + ' ' + rx + ' ' + (effTop + r) + ' L ' + rx + ' ' + (effBot - r) + ' Q ' + rx + ' ' + effBot + ' ' + (rx - dir * r) + ' ' + effBot + ' L ' + edgeX + ' ' + it.botY;
-            var path = document.createElementNS(ns, 'path');
-            path.setAttribute('d', d);
-            path.setAttribute('fill', 'none');
-            path.setAttribute('stroke', it.lnk.color);
-            path.setAttribute('stroke-width', '2.5');
-            path.setAttribute('stroke-linecap', 'round');
-            if (it.lnk.type === 'parallel') path.setAttribute('stroke-dasharray', '6 4');
-            svg.appendChild(path);
-            [it.topY, it.botY].forEach(function(cy){
-              var c = document.createElementNS(ns, 'circle');
-              c.setAttribute('cx', String(edgeX)); c.setAttribute('cy', String(cy)); c.setAttribute('r', '3.5');
-              c.setAttribute('fill', it.lnk.color);
-              svg.appendChild(c);
-            });
-            var lblText = (it.lnk.label || '').slice(0, 8);
-            var badgeW = Math.max(40, Math.round(lblText.length * 6.2 + 12));
-            var g = document.createElementNS(ns, 'g');
-            g.setAttribute('transform', 'translate(' + rx + ',' + midY + ')');
-            var rect = document.createElementNS(ns, 'rect');
-            rect.setAttribute('x', String(-badgeW / 2)); rect.setAttribute('y', '-9.5'); rect.setAttribute('width', String(badgeW)); rect.setAttribute('height', '19'); rect.setAttribute('rx', '9.5');
-            rect.setAttribute('fill', it.lnk.color);
-            var txt = document.createElementNS(ns, 'text');
-            txt.setAttribute('x', '0'); txt.setAttribute('y', '3.5'); txt.setAttribute('text-anchor', 'middle');
-            txt.setAttribute('fill', contrastText(it.lnk.color)); txt.setAttribute('font-size', '8.5'); txt.setAttribute('font-weight', '800');
-            txt.setAttribute('font-family', 'Inter, sans-serif');
-            txt.style.textTransform = 'uppercase'; txt.style.letterSpacing = '0.06em';
-            txt.textContent = lblText;
-            g.appendChild(rect); g.appendChild(txt); svg.appendChild(g);
+          hostMap.forEach(function(items, host){
+            renderRailsIntoHost(host, items, isRtl, gutterPx);
           });
-          wrap.insertBefore(svg, wrap.firstChild);
         });
       }
       window.addEventListener('load', drawExportRails);
@@ -2621,7 +2706,8 @@ export default function App() {
   }, [poeticLinks.length, pendingPoeticAnchor, verses]);
 
   const showRailGutter = poeticLinks.length > 0 || !!pendingPoeticAnchor || (appMode === 'control' && toolbarMode === 'poetic' && activeTool?.type === 'poeticLink');
-  const railGutterPx = showRailGutter ? Math.min(224, 88 + Math.max(0, poeticLinks.length - 1) * 34) : 0;
+  const activeLaneCount = useMemo(() => countPoeticLanes(poeticLinks, verses), [poeticLinks, verses]);
+  const railGutterPx = showRailGutter ? Math.min(248, 104 + Math.max(0, activeLaneCount - 1) * 48) : 0;
   const effectiveLineHeight = (settings.showPoeticLabels !== false && (hasPoeticAnnotations || (appMode === 'control' && toolbarMode === 'poetic')))
     ? Math.max(settings.textSpacing, settings.textSize < 26 ? 2.35 : 2.18)
     : settings.textSpacing;
@@ -3070,7 +3156,7 @@ export default function App() {
     setPendingPoeticAnchor(null);
   }, [commitDomVersesToState, pendingPoeticAnchor, unwrapDomAnchorById]);
 
-  const applyPoeticAnchorStep = useCallback((colorOverride?: string, typeOverride?: 'inclusio' | 'parallel' | 'chiasm') => {
+  const applyPoeticAnchorStep = useCallback((colorOverride?: string, typeOverride?: 'inclusio' | 'parallel' | 'chiasm', labelOverride?: string) => {
     const selection = window.getSelection();
     if (!selection || selection.rangeCount === 0) return;
     expandSelectionToWords(selection, true);
@@ -3088,14 +3174,17 @@ export default function App() {
 
     const effectiveType = typeOverride || poeticLinkType;
     const meta = POETIC_LINK_META[effectiveType];
+    const customLbl = (labelOverride !== undefined ? labelOverride : activeCustomRailLabel)?.trim() || '';
+    const effectiveLabel = customLbl || meta.label;
+    const defaultCustomColor = activeMarkupColor && activeMarkupColor !== '#000000' ? activeMarkupColor : '#f59e0b';
 
     if (!pendingPoeticAnchor) {
       const anchorId = `anc-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
-      const color = colorOverride || meta.color;
+      const color = colorOverride || (customLbl ? defaultCustomColor : meta.color);
       const span = document.createElement('span');
       span.className = 'verse-markup verse-poetic-anchor';
       span.setAttribute('data-glide-anchor', anchorId);
-      span.setAttribute('data-glide-anchor-label', `${meta.label} 1/2`);
+      span.setAttribute('data-glide-anchor-label', `${effectiveLabel} 1/2`);
       span.style.setProperty('--glide-anchor-color', color);
       span.style.backgroundColor = `rgba(${parseInt(color.slice(1, 3), 16)},${parseInt(color.slice(3, 5), 16)},${parseInt(color.slice(5, 7), 16)},0.16)`;
 
@@ -3107,17 +3196,18 @@ export default function App() {
         selection.removeAllRanges();
         // Commit DOM -> React verses BEFORE setPendingPoeticAnchor triggers a re-render
         commitDomVersesToState();
-        setPendingPoeticAnchor({ anchorId, verseIndex, type: effectiveType, color });
+        setPendingPoeticAnchor({ anchorId, verseIndex, type: effectiveType, color, label: effectiveLabel });
       } catch (e) {}
       return;
     }
 
     const toAnchorId = `anc-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
     const linkMeta = POETIC_LINK_META[pendingPoeticAnchor.type];
+    const finalLabel = pendingPoeticAnchor.label || linkMeta.label;
     const span = document.createElement('span');
     span.className = 'verse-markup verse-poetic-anchor';
     span.setAttribute('data-glide-anchor', toAnchorId);
-    span.setAttribute('data-glide-anchor-label', linkMeta.label);
+    span.setAttribute('data-glide-anchor-label', finalLabel);
     span.style.setProperty('--glide-anchor-color', pendingPoeticAnchor.color);
     span.style.backgroundColor = `rgba(${parseInt(pendingPoeticAnchor.color.slice(1, 3), 16)},${parseInt(pendingPoeticAnchor.color.slice(3, 5), 16)},${parseInt(pendingPoeticAnchor.color.slice(5, 7), 16)},0.16)`;
 
@@ -3130,13 +3220,13 @@ export default function App() {
 
       const firstAnchorEl = container.querySelector(`[data-glide-anchor="${pendingPoeticAnchor.anchorId}"]`);
       if (firstAnchorEl) {
-        firstAnchorEl.setAttribute('data-glide-anchor-label', linkMeta.label);
+        firstAnchorEl.setAttribute('data-glide-anchor-label', finalLabel);
       }
 
       const newLink: PoeticLink = {
         id: `lnk-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
         type: pendingPoeticAnchor.type,
-        label: linkMeta.label,
+        label: finalLabel,
         color: pendingPoeticAnchor.color,
         fromAnchorId: pendingPoeticAnchor.anchorId,
         toAnchorId
@@ -3148,7 +3238,7 @@ export default function App() {
       commitDomVersesToState({ poeticLinks: updatedLinks });
       setPendingPoeticAnchor(null);
     } catch (e) {}
-  }, [cleanupEmptyPoeticSpans, commitDomVersesToState, expandSelectionToWords, pendingPoeticAnchor, poeticLinkType, resolveSingleVerseRange, setPoeticLinks]);
+  }, [activeCustomRailLabel, activeMarkupColor, cleanupEmptyPoeticSpans, commitDomVersesToState, expandSelectionToWords, pendingPoeticAnchor, poeticLinkType, resolveSingleVerseRange, setPoeticLinks]);
 
   const removePoeticLink = useCallback((linkId: string) => {
     const target = stateRef.current.poeticLinks.find(l => l.id === linkId);
@@ -3325,10 +3415,10 @@ export default function App() {
     if (!isEraser && !hasSelection) return;
 
     if (tool.type === 'poeticLink' || (pendingPoeticAnchor && !toolOverride && !isEraser)) {
-      const linkKind = (tool.value === 'inclusio' || tool.value === 'parallel' || tool.value === 'chiasm')
-        ? tool.value
-        : pendingPoeticAnchor?.type;
-      applyPoeticAnchorStep(undefined, linkKind);
+      const isPresetKind = tool.value === 'inclusio' || tool.value === 'parallel' || tool.value === 'chiasm';
+      const linkKind = isPresetKind ? tool.value : (pendingPoeticAnchor?.type || poeticLinkType);
+      const customLbl = (!isPresetKind && typeof tool.value === 'string' && tool.value.trim()) ? tool.value.trim() : undefined;
+      applyPoeticAnchorStep(undefined, linkKind, customLbl);
       return;
     }
 
@@ -5455,6 +5545,21 @@ export default function App() {
                 }
                 setShowCustomLabelInput(false);
               };
+              const commitCustomRail = () => {
+                const trimmed = customRailLabel.trim();
+                if (!trimmed) {
+                  setShowCustomRailInput(false);
+                  return;
+                }
+                setActiveCustomRailLabel(trimmed);
+                const nextTool = { type: 'poeticLink', value: trimmed };
+                setActiveTool(nextTool);
+                const sel = window.getSelection();
+                if (sel && !sel.isCollapsed && sel.toString().trim().length > 0 && containerRef.current?.contains(sel.anchorNode)) {
+                  applyPoeticAnchorStep(undefined, poeticLinkType, trimmed);
+                }
+                setShowCustomRailInput(false);
+              };
 
               return (
                 <motion.div
@@ -5517,7 +5622,7 @@ export default function App() {
                   {pendingPoeticAnchor ? (
                     <div className="flex items-center gap-2 px-2 py-0.5 rounded-lg bg-emerald-500/15 text-emerald-400 font-semibold">
                       <span className="animate-pulse">●</span>
-                      <span>Rail 2/2 ({POETIC_LINK_META[pendingPoeticAnchor.type].label}): Drag closing phrase</span>
+                      <span>Rail 2/2 ({pendingPoeticAnchor.label || POETIC_LINK_META[pendingPoeticAnchor.type].label}): Drag closing phrase</span>
                       <button
                         onMouseDown={(e) => { e.preventDefault(); cancelPendingPoeticAnchor(); }}
                         className="px-1.5 py-0.5 rounded bg-red-500/20 text-red-400 hover:bg-red-500/30 text-[10px] font-bold uppercase"
@@ -5526,22 +5631,24 @@ export default function App() {
                       </button>
                     </div>
                   ) : (
-                    <div className="flex items-center gap-1">
+                    <div className="flex items-center gap-1 flex-wrap justify-center">
                       <span className={`text-[10px] uppercase font-bold tracking-wider ${uiTextMuted} mr-0.5`}>Rail:</span>
                       {(['inclusio', 'parallel', 'chiasm'] as const).map(kind => {
                         const meta = POETIC_LINK_META[kind];
-                        const isArmed = activeTool?.type === 'poeticLink' && poeticLinkType === kind;
-                        const isSelected = poeticLinkType === kind;
+                        const isArmed = activeTool?.type === 'poeticLink' && !activeCustomRailLabel && poeticLinkType === kind;
+                        const isSelected = !activeCustomRailLabel && poeticLinkType === kind;
                         return (
                           <button
                             key={kind}
                             onMouseDown={(e) => {
                               e.preventDefault();
                               setPoeticLinkType(kind);
+                              setActiveCustomRailLabel(null);
+                              setShowCustomRailInput(false);
                               setActiveTool({ type: 'poeticLink', value: kind });
                               const sel = window.getSelection();
                               if (sel && !sel.isCollapsed && sel.toString().trim().length > 0 && containerRef.current?.contains(sel.anchorNode)) {
-                                applyPoeticAnchorStep(undefined, kind);
+                                applyPoeticAnchorStep(undefined, kind, '');
                               }
                             }}
                             className={`px-2 py-0.5 rounded-lg font-bold text-[10px] uppercase tracking-wider transition-all border ${
@@ -5558,6 +5665,68 @@ export default function App() {
                           </button>
                         );
                       })}
+                      {activeCustomRailLabel && !showCustomRailInput && (
+                        <button
+                          onMouseDown={(e) => {
+                            e.preventDefault();
+                            setActiveTool({ type: 'poeticLink', value: activeCustomRailLabel });
+                            const sel = window.getSelection();
+                            if (sel && !sel.isCollapsed && sel.toString().trim().length > 0 && containerRef.current?.contains(sel.anchorNode)) {
+                              applyPoeticAnchorStep(undefined, poeticLinkType, activeCustomRailLabel);
+                            }
+                          }}
+                          className={`px-2 py-0.5 rounded-lg font-bold text-[10px] uppercase tracking-wider transition-all border text-white shadow-sm ${
+                            activeTool?.type === 'poeticLink' ? 'ring-2 ring-white/50' : 'opacity-85'
+                          }`}
+                          style={{
+                            backgroundColor: activeMarkupColor && activeMarkupColor !== '#000000' ? activeMarkupColor : '#f59e0b',
+                            borderColor: activeMarkupColor && activeMarkupColor !== '#000000' ? activeMarkupColor : '#f59e0b'
+                          }}
+                          title={`Custom Movement / Section Rail ("${activeCustomRailLabel}") — Select opening phrase, then closing phrase`}
+                        >
+                          {activeCustomRailLabel}
+                        </button>
+                      )}
+                      {showCustomRailInput ? (
+                        <form
+                          onSubmit={(e) => {
+                            e.preventDefault();
+                            commitCustomRail();
+                          }}
+                          className="inline-flex items-center gap-1"
+                        >
+                          <input
+                            type="text"
+                            value={customRailLabel}
+                            onChange={(e) => setCustomRailLabel(e.target.value)}
+                            onKeyDown={(e) => {
+                              e.stopPropagation();
+                              if (e.key === 'Escape') setShowCustomRailInput(false);
+                            }}
+                            placeholder="Movement..."
+                            maxLength={15}
+                            autoFocus
+                            className={`w-24 px-1.5 py-0.5 rounded text-[10px] font-bold uppercase outline-none border ${uiBorder} ${uiTheme === 'dark' ? 'bg-slate-900 text-white' : 'bg-white text-slate-900'}`}
+                          />
+                          <button
+                            type="submit"
+                            className="px-1.5 py-0.5 rounded bg-emerald-500 text-slate-950 font-bold text-[10px] uppercase"
+                          >
+                            Set
+                          </button>
+                        </form>
+                      ) : (
+                        <button
+                          onMouseDown={(e) => {
+                            e.preventDefault();
+                            setShowCustomRailInput(true);
+                          }}
+                          className={`px-2 py-0.5 rounded-lg font-bold text-[10px] uppercase tracking-wider ${uiBtnBg} ${uiTextMuted} ${uiBtnHover} transition-colors`}
+                          title="Add custom rail marker (e.g. Complaint, Petition, Trust, Praise, Refrain)"
+                        >
+                          + Custom
+                        </button>
+                      )}
                       {activeTool?.type === 'poeticLink' && (
                         <span className="text-[10px] font-semibold text-emerald-400 ml-1">1/2: drag opening</span>
                       )}
